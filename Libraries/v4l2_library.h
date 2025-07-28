@@ -14,9 +14,26 @@
 #ifndef _V4L2_LIBRARY_H
 #define _V4L2_LIBRARY_H
 
+enum io_method 
+{
+        IO_METHOD_READ,
+        IO_METHOD_MMAP,
+        IO_METHOD_USERPTR,
+};
+
+struct buffer 
+{
+        void   *start;
+        size_t  length;
+};
+
 struct v4l2_state {
     int fileDescriptor;
     char deviceName[64];
+    enum io_method ioMethod;
+    struct v4l2_format formatData;
+    unsigned int numBuffers;
+    struct buffer *bufferList;
 };
 
 #endif // #ifndef _V4L2_LIBRARY_H
