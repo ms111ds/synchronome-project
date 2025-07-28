@@ -1,0 +1,39 @@
+INCLUDE_DIRS = ./Tests ./Libraries
+LIB_DIRS = 
+CC=gcc
+
+CDEFS=
+CFLAGS= -Wall -O0 -g $(addprefix -iquote ,$(INCLUDE_DIRS)) $(CDEFS)
+LIBS= -lrt
+
+HFILES= 
+CFILES= synchronome_tests.c
+
+SRCS= ${HFILES} ${CFILES}
+OBJS= ${CFILES:.c=.o}
+CLEAN_EXT = .o .d .ppm .pgm ~
+CE = $(addprefix -iquote ,$(INCLUDE_DIRS))
+
+.PHONY: all clean remake
+
+all: synchronome_tests
+
+
+clean:
+	find ./ -type f \( -name "*.o" -o \
+	                   -name "*.d" -o \
+	                   -name "*.ppm" -o \
+	                   -name "*.pgm" -o \
+	                   -name "*~" \) -delete
+	-rm -f synchronome_tests
+
+remake: clean all
+
+v4l2_library.o: ./Libraries/v4l2_library.c
+	$(CC) $(CFLAGS) -c $<
+
+synchronome_tests: synchronome_tests.o v4l2_library.o
+	$(CC) $(LDFLAGS) $(CFLAGS) $^ -o $@ $(LIBS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $<
