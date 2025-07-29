@@ -4,6 +4,9 @@
 #include "Libraries/v4l2_library.h"
 #include "Libraries/project_types.h"
 
+#define HRES 960
+#define VRES 540
+
 struct v4l2_state cameraState;
 
 int main( int argc, char *argv[] )
@@ -23,6 +26,32 @@ int main( int argc, char *argv[] )
     if ( isPass == false )
     {
         printf("open_device return: %i\n", isPass );
+        return EXIT_FAILURE;
+    }
+
+    isPass = init_device( IO_METHOD_MMAP, HRES, VRES, &cameraState );
+    if ( isPass == false )
+    {
+        printf("init_device return: %i\n", isPass );
+        return EXIT_FAILURE;
+    }
+
+    isPass = start_capturing( &cameraState );
+    if ( isPass == false )
+    {
+        printf("start_captureing return: %i\n", isPass );
+    }
+
+    isPass = stop_capturing( &cameraState );
+    if ( isPass == false )
+    {
+        printf("stop_captureing return: %i\n", isPass );     
+    }
+    
+    isPass = uninit_device( &cameraState );
+    if ( isPass == false )
+    {
+        printf("uninit_device return: %i\n", isPass );
         return EXIT_FAILURE;
     }
     

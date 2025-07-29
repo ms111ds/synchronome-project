@@ -7,11 +7,11 @@
 
 
 
-static void errno_exit(const char *s)
-{
-        fprintf(stderr, "%s error %d, %s\n", s, errno, strerror(errno));
-        exit(EXIT_FAILURE);
-}
+//static void errno_exit(const char *s)
+//{
+//        fprintf(stderr, "%s error %d, %s\n", s, errno, strerror(errno));
+//        exit(EXIT_FAILURE);
+//}
 
 static void errno_print(const char *s)
 {
@@ -60,7 +60,7 @@ static bool init_mmap( struct v4l2_state *state )
     // Request a number (NUM_BUFFERS) of buffers within the video capture
     // device's memory for use by the application to read images captured
     // by the device.
-    CLEAR(req);
+    memset(&req, '\0', sizeof(req) );
 
     req.count = NUM_BUFFERS;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -104,7 +104,7 @@ static bool init_mmap( struct v4l2_state *state )
     {
         struct v4l2_buffer buf;
 
-        CLEAR(buf);
+        memset(&buf, '\0', sizeof(buf) );
 
         buf.type        = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory      = V4L2_MEMORY_MMAP;
@@ -135,7 +135,7 @@ static bool init_mmap( struct v4l2_state *state )
     }
 
 
-    state->numBuffers = req.count
+    state->numBuffers = req.count;
     state->bufferList = buffers;
     isSuccess = true;
 
@@ -145,7 +145,7 @@ END:
     {
         for ( i = 0; i < numMaps; i++ )
         {
-            munmap( buffers[i].start, buffers[i].length) )
+            munmap( buffers[i].start, buffers[i].length);
         }
     
         req.count = 0;
@@ -303,17 +303,17 @@ bool close_device( struct v4l2_state *state )
  * Return:      true if successful, false otherwise.
  *
  *****************************************************************************/
-bool void init_device( enum io_method ioMethod,
-                       unsigned int numHorizontalPixels,
-                       unsigned int numVerticalPixels,
-                       struct v4l2_state *state )
+bool init_device( enum io_method ioMethod,
+                  unsigned int numHorizontalPixels,
+                  unsigned int numVerticalPixels,
+                  struct v4l2_state *state )
 {
     struct v4l2_capability cap;
     struct v4l2_cropcap cropcap;
     struct v4l2_crop crop;
     struct v4l2_format formatData;
     unsigned int min;
-    bool isSucess = true;
+    bool isSuccess = true;
 
     // query device capabilities to see if it is Video For Linux (V4L2)
     // compatible.
@@ -336,7 +336,7 @@ bool void init_device( enum io_method ioMethod,
     {
         fprintf(stderr,
                 "%s is no video capture device\n",
-                state-device->deviceName );
+                state->deviceName );
         isSuccess = false;
         goto END;
     }
@@ -373,7 +373,7 @@ bool void init_device( enum io_method ioMethod,
 
 
     // Check to see if image cropping is available.
-    CLEAR(cropcap);
+    memset(&cropcap, '\0', sizeof(cropcap) );
 
     cropcap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
@@ -382,7 +382,7 @@ bool void init_device( enum io_method ioMethod,
         crop.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         crop.c = cropcap.defrect; /* reset to default */
 
-        if (-1 == xioctl(fd, VIDIOC_S_CROP, &crop))
+        if ( -1 == xioctl( state->fileDescriptor, VIDIOC_S_CROP, &crop ) )
         {
             switch (errno)
             {
@@ -403,7 +403,8 @@ bool void init_device( enum io_method ioMethod,
 
 
     // Select or force video format.
-    CLEAR( formatData );
+    memset(&formatData, '\0', sizeof(formatData) );
+    
     
     formatData.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
@@ -477,7 +478,7 @@ bool void init_device( enum io_method ioMethod,
             break;
 
         case IO_METHOD_MMAP:
-            init_mmap();
+            init_mmap( state );
             break;
 
         case IO_METHOD_USERPTR:
@@ -526,7 +527,8 @@ bool uninit_device( struct v4l2_state *state )
         case IO_METHOD_MMAP:
             for ( i = 0; i < state->numBuffers; ++i )
             {
-                if ( -1 == munmap(buffers[i].start, buffers[i].length) )
+                if ( -1 == munmap(state->bufferList[i].start,
+                                  state->bufferList[i].length) )
                 {
                     errno_print("munmap");
                     isOk = false;
@@ -555,6 +557,107 @@ bool uninit_device( struct v4l2_state *state )
     memset( &(state->formatData), '\0', sizeof(state->formatData) );
 
     return isOk;
+}
+
+
+
+/******************************************************************************
+ *
+ * start_capturing
+ *
+ *
+ * Description: Start the image capture process when using memory mapping (MMAP)
+ *              or user pointers.
+ *
+ * Arguments:   state - v4l2 state with the information of an open video device. 
+ *
+ * Return:      true if successful, false otherwise.
+ *
+ *****************************************************************************/
+bool start_capturing( struct v4l2_state *state )
+{
+    //unsigned int i;
+    enum v4l2_buf_type type;
+    bool isOk = true;
+
+    switch ( state->ioMethod ) 
+    {
+        case IO_METHOD_READ:
+            /* Nothing to do. */
+            printf( "read()/write() I/O currently not supported\n" );
+            isOk = false;
+            break;
+        
+        case IO_METHOD_MMAP:
+            type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            if ( -1 == xioctl( state->fileDescriptor,
+                               VIDIOC_STREAMON,
+                               &type ) )
+            {
+                errno_print( "VIDIOC_STREAMON" );
+                isOk = false;
+            }
+
+            break;
+        
+        case IO_METHOD_USERPTR:
+            //type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            //if (-1 == xioctl(fd, VIDIOC_STREAMON, &type))
+            //        errno_exit("VIDIOC_STREAMON");
+            printf( "user pointer I/O currently not supported\n" );
+            isOk = false;
+            break;
+    }
+
+    return isOk;
+}
+
+/******************************************************************************
+ *
+ * stop_capturing
+ *
+ *
+ * Description: Stop the image capture process when using memory mapping (MMAP)
+ *              or user pointers.
+ *
+ * Arguments:   state - v4l2 state with the information of an open video device. 
+ *
+ * Return:      true if successful, false otherwise.
+ *
+ *****************************************************************************/
+bool stop_capturing( struct v4l2_state *state )
+{
+    enum v4l2_buf_type type;
+    bool isPass = true;
+
+    switch ( state->ioMethod )
+    {
+        case IO_METHOD_READ:
+            /* Nothing to do. */
+            printf( "read()/write() I/O currently not supported\n" );
+            isPass = false;
+            break;
+        
+        case IO_METHOD_MMAP:
+        case IO_METHOD_USERPTR:
+            type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            
+            if ( state->ioMethod == IO_METHOD_USERPTR )
+            {
+                printf( "user pointer I/O currently not supported\n" );
+                isPass = false;
+            }
+            else if ( -1 == xioctl( state->fileDescriptor,
+                                    VIDIOC_STREAMOFF,
+                                    &type ) )
+            {
+                errno_print("VIDIOC_STREAMOFF");
+                isPass = false;
+            }
+            break;
+    }
+
+    return isPass;
 }
 
 #endif // #ifndef _V4L2_LIBRARY_C
