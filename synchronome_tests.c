@@ -1,8 +1,10 @@
+#include "Libraries/common_library.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include "Libraries/v4l2_library.h"
-#include "Libraries/project_types.h"
+#include "Services/test_services.h"
+
 
 #define HRES 960
 #define VRES 540
@@ -40,6 +42,12 @@ int main( int argc, char *argv[] )
     if ( isPass == false )
     {
         printf("start_captureing return: %i\n", isPass );
+    }
+
+    isPass = run_test_services( &cameraState );
+    if ( isPass == false )
+    {
+        printf("run_test_services return: %i\n", isPass );
     }
 
     isPass = stop_capturing( &cameraState );

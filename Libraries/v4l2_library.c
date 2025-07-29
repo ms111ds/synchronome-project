@@ -13,10 +13,6 @@
 //        exit(EXIT_FAILURE);
 //}
 
-static void errno_print(const char *s)
-{
-        fprintf(stderr, "%s error %d, %s\n", s, errno, strerror(errno));
-}
 
 static int xioctl(int fh, int request, void *arg)
 {

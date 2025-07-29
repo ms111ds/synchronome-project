@@ -1,4 +1,4 @@
-INCLUDE_DIRS = ./Tests ./Libraries
+INCLUDE_DIRS = ./Libraries ./Services
 LIB_DIRS = 
 CC=gcc
 
@@ -29,10 +29,19 @@ clean:
 
 remake: clean all
 
-v4l2_library.o: ./Libraries/v4l2_library.c
+common_library.o: ./Libraries/common_library.c
 	$(CC) $(CFLAGS) -c $<
 
-synchronome_tests: synchronome_tests.o v4l2_library.o
+v4l2_library.o: ./Libraries/v4l2_library.c common_library.o
+	$(CC) $(CFLAGS) -c $<
+	
+test_services.o: ./Services/test_services.c common_library.o
+	$(CC) $(CFLAGS) -c $<
+	
+synchronome_tests.o: synchronome_tests.c common_library.o
+	$(CC) $(CFLAGS) -c $<
+
+synchronome_tests: synchronome_tests.o v4l2_library.o test_services.o common_library.o
 	$(CC) $(LDFLAGS) $(CFLAGS) $^ -o $@ $(LIBS)
 
 %.o: %.c
