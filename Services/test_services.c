@@ -8,41 +8,45 @@
 #define CORE_2 2
 #define CORE_3 3
 
-pthread_attr_t     attr_test;
-pthread_t          thread_test;
-struct sched_param params_test;
+pthread_attr_t     attrTest;
+pthread_t          threadTest;
+struct sched_param paramsTest;
 
-pthread_attr_t     attr_starter;
-pthread_t          thread_starter;
-struct sched_param params_starter;
+pthread_attr_t     attrStarter;
+pthread_t          threadStarter;
+struct sched_param paramsStarter;
+
+sem_t semServiceTest;
+pthread_mutex_t mutexTest;
+unsigned int sequencePeriods = 30;
+unsigned int remainingSequencePeriods;
 
 
 static bool set_thread_attributes( pthread_attr_t *attr,
                                    struct sched_param *params,
-                                   int scheduling_policy,
+                                   int schedulingPolicy,
                                    int priority,
                                    int affinity );
 static void *starter( void *threadp );
+void sequencer( int id );
 static void *service_test( void *threadp );
 static void print_scheduler(void);
 
 /******************************************************************************
  *
- * mainloop
+ * run_test_services
  *
  *
- * Description: Sets up the scheduling attributes for the scheduler, the
- *              frame load service, and frame processing service. Then
- *              starts the scheduler and waits for it to finish.
+ * Description: Starts the starter thread.
  *
- * Arguments:   N/A
+ * Arguments:   state - v4l2 state with the information of an open video device.
  *
- * Return:      N/A
+ * Return:      true if successful, false otherwise.
  *
  *****************************************************************************/
 bool run_test_services( struct v4l2_state *state )
 {
-    int thread_max_priority;
+    int threadMaxPriority;
     bool isPass = false;
     int rv;
     
@@ -59,18 +63,18 @@ bool run_test_services( struct v4l2_state *state )
 
     // Set thread attributes of the image loading service, the image processing
     // service and the scheduler.
-    thread_max_priority = sched_get_priority_max( MY_SCHED_POLICY );
-    if ( thread_max_priority == -1 )
+    threadMaxPriority = sched_get_priority_max( MY_SCHED_POLICY );
+    if ( threadMaxPriority == -1 )
     {
         errno_print("error getting minimum priority");
         goto END;
     }
 
     // set "test" service thread attributes
-    isPass = set_thread_attributes( &attr_starter,
-                                    &params_starter,
+    isPass = set_thread_attributes( &attrStarter,
+                                    &paramsStarter,
                                     MY_SCHED_POLICY,
-                                    thread_max_priority,
+                                    threadMaxPriority,
                                     CORE_3 );
     if ( isPass != true )
     {
@@ -80,8 +84,8 @@ bool run_test_services( struct v4l2_state *state )
 
     // Start the launger and wait for it to join back.
     // Starts the test service and the scheduler
-    rv = pthread_create( &thread_starter, // pointer to thread descriptor
-                         &attr_starter,   // use specific attributes
+    rv = pthread_create( &threadStarter, // pointer to thread descriptor
+                         &attrStarter,   // use specific attributes
                          starter,         // thread function entry point
                          NULL );          // parameters to pass in
     if ( rv < 0 )
@@ -90,7 +94,7 @@ bool run_test_services( struct v4l2_state *state )
         goto END;
     }
 
-    rv = pthread_join( thread_starter, NULL );
+    rv = pthread_join( threadStarter, NULL );
     if ( rv < 0)
     {
         errno_print( "error joining with starter service\n");
@@ -115,7 +119,7 @@ END:
  *              params (OUT):  scheduling parameters struct that will be set up.
  *                                      service.
  *
- *              scheduling_policy (IN): scheduling policy to set up in attr.
+ *              schedulingPolicy (IN): scheduling policy to set up in attr.
  *
  *              priority (IN): the priority to set up in attr and params.
  *
@@ -126,7 +130,7 @@ END:
  *****************************************************************************/
 static bool set_thread_attributes( pthread_attr_t *attr,
                                    struct sched_param *params,
-                                   int scheduling_policy,
+                                   int schedulingPolicy,
                                    int priority,
                                    int affinity )
 {
@@ -150,7 +154,7 @@ static bool set_thread_attributes( pthread_attr_t *attr,
         goto END;
     }
 
-    rc = pthread_attr_setschedpolicy( attr, scheduling_policy );
+    rc = pthread_attr_setschedpolicy( attr, schedulingPolicy );
     if ( rc != 0 )
     {
         errno_print( "pthread_attr_setschedpolicy" );
@@ -188,8 +192,9 @@ END:
  * starter
  *
  *
- * Description: starts the image (frame) loading service and image (frame)
- *              processing service.
+ * Description: initializes mutexes and semaphores needed by the sequencer and
+ *              the test service. Then starts the test the service and the
+ *              sequencer. The sequencer timer is also started here.
  *
  * Arguments:   threadp (IN): not used.
  *
@@ -200,23 +205,43 @@ static void *starter( void *threadp )
 {
     int rv;
     bool isPass;
-    int thread_max_priority;
+    int threadMaxPriority;
+    timer_t sequencerTimer;
+    struct itimerspec intervalTime = { {1,0}, { 1,0 } };
+    struct itimerspec oldIntervalTime = { {1,0}, { 1,0 } };
+    int flags = 0;
+    bool isSemCreated = false;
+    bool isMutCreated = false;
 
     printf( "starter " );
     print_scheduler( );
 
-    thread_max_priority = sched_get_priority_max( MY_SCHED_POLICY );
-    if ( thread_max_priority == -1 )
+    if ( sem_init( &semServiceTest, 0, 0 ) != 0 )
+    {
+        errno_print( "semaphore init" );
+        goto END;
+    }
+    isSemCreated = true;
+
+    if ( pthread_mutex_init(&mutexTest, NULL) != 0 )
+    {
+        errno_print( "mutex init" );
+        goto END;
+    }
+    isMutCreated = true;
+
+    threadMaxPriority = sched_get_priority_max( MY_SCHED_POLICY );
+    if ( threadMaxPriority == -1 )
     {
         errno_print("error getting minimum priority");
         goto END;
     }
 
     // set "test" service thread attributes
-    isPass = set_thread_attributes( &attr_test,
-                                    &params_test,
+    isPass = set_thread_attributes( &attrTest,
+                                    &paramsTest,
                                     MY_SCHED_POLICY,
-                                    thread_max_priority,
+                                    threadMaxPriority - 1,
                                     CORE_3 );
     if ( isPass != true )
     {
@@ -224,8 +249,8 @@ static void *starter( void *threadp )
         goto END;
     }
     
-    rv =  pthread_create(&thread_test, // pointer to thread descriptor
-                         &attr_test,   // use specific attributes
+    rv =  pthread_create(&threadTest, // pointer to thread descriptor
+                         &attrTest,   // use specific attributes
                          service_test, // thread function entry point
                          NULL );       // parameters to pass in
     if ( rv < 0 )
@@ -234,29 +259,103 @@ static void *starter( void *threadp )
         goto END;
     }
 
+    /* set up to signal SIGALRM if timer expires */
+    remainingSequencePeriods = sequencePeriods;
+    timer_create( CLOCK_REALTIME, NULL, &sequencerTimer );
+    signal(SIGALRM, (void(*)()) sequencer);
 
+    intervalTime.it_interval.tv_sec = 0;
+    intervalTime.it_interval.tv_nsec = 100000000; // refill timer with this
+    intervalTime.it_value.tv_sec = 0;
+    intervalTime.it_value.tv_nsec = 1; // initial value. start ASAP.
 
-    rv = pthread_join( thread_test, NULL );
+    timer_settime( sequencerTimer, flags, &intervalTime, &oldIntervalTime );
+
+    rv = pthread_join( threadTest, NULL );
     if ( rv < 0)
     {
         fprintf(stderr, "error joining with test service\n");
     }
 
+    intervalTime.it_interval.tv_sec = 0;
+    intervalTime.it_interval.tv_nsec = 0;
+    intervalTime.it_value.tv_sec = 0;
+    intervalTime.it_value.tv_nsec = 0;
+    timer_settime( sequencerTimer, flags, &intervalTime, &oldIntervalTime );
+
 END:
 
+    if ( isSemCreated == true ) sem_destroy( &semServiceTest );
+    if ( isMutCreated == true ) pthread_mutex_destroy( &mutexTest );
     return (void *)NULL;
 }
 
+/******************************************************************************
+ *
+ * sequencer
+ *
+ *
+ * Description: The sequencer function. Post semaphores whenever each service
+ *              should run.
+ *
+ * Arguments:   id (IN): not used.
+ *
+ * Return:      N/A
+ *
+ *****************************************************************************/
+void sequencer(int id)
+{
+    printf( "in the SE-SE-SEQUENCER!!\n" );
+    pthread_mutex_lock( &mutexTest );
+    if ( remainingSequencePeriods > 0 ) remainingSequencePeriods--;
+    pthread_mutex_unlock( &mutexTest );
+    sem_post( &semServiceTest );
+}
+
+
+/******************************************************************************
+ *
+ * service_test
+ *
+ *
+ * Description: runs the tests.
+ *
+ * Arguments:   threadp (IN): not used.
+ *
+ * Return:      Null pointer
+ *
+ *****************************************************************************/
 static void *service_test( void *threadp )
 {
-    printf( "in the testing function!!!!\n" );
+    bool isFinal = false;
+
+    while ( true )
+    {
+        sem_wait( &semServiceTest );
+        printf( "in the testing function!!!!\n" );
+        pthread_mutex_lock( &mutexTest );
+        if ( remainingSequencePeriods == 0 ) isFinal = true;
+        pthread_mutex_unlock( &mutexTest );
+        if ( isFinal == true ) break;
+    }
 
     return (void *)NULL;
 }
 
 
 
-
+/******************************************************************************
+ *
+ * print_scheduler
+ *
+ *
+ * Description: Prints the scheduling policy of the calling thread.
+ *
+ * Arguments:   N/A
+ *
+ * Return:      N/A
+ *
+ *****************************************************************************/
 static void print_scheduler( void )
 {
    int schedType;

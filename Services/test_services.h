@@ -9,6 +9,8 @@
 #include <sched.h>
 #include <syslog.h>
 #include <sched.h>
+#include <semaphore.h>
+#include <signal.h>
 #include "../Libraries/v4l2_library.h"
 
 #ifndef _TEST_SRV_H
