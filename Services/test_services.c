@@ -41,6 +41,8 @@ double imageProcessorMinTime;
 double imageWriterCumulativeTime;
 double imageWriterMaxTime;
 double imageWriterMinTime;
+char unameBuf[256];
+unsigned int unameBufLen;
 
 
 static bool set_thread_attributes( pthread_attr_t *attr,
@@ -72,6 +74,7 @@ static void yuv2rgb(int y,
                     unsigned char *r,
                     unsigned char *g,
                     unsigned char *b);
+static void addCoolBorder( char *yuyvBufIn, int yuyvBufLen, int pixelsPerLine );
 static void print_scheduler(void);
 
 /******************************************************************************
@@ -92,6 +95,15 @@ bool run_test_services( struct v4l2_state *state )
     bool isPass = false;
     int rv;
     struct thread_args serviceArgs;
+
+    FILE* unameOutput = popen("uname -a", "r");
+    if ( fgets( unameBuf, sizeof(unameBuf), unameOutput) == NULL )
+    {
+        errno_print( "uname -a output\n" );
+        goto END;
+    }
+    pclose( unameOutput );
+    unameBufLen = (unsigned int)strlen( unameBuf );
     
     //if ( init_buffer_status_array() != 0 )
     //{
@@ -700,6 +712,10 @@ static bool processImage( struct v4l2_state *state )
         goto END;
     }
 
+    addCoolBorder( state->bufferList[latestImageIndex].start,
+                   state->bufferList[latestImageIndex].length,
+                   state->formatData.fmt.pix.width );
+
     // Transfer the image out of kernel space in RGB format
     outFrameSize = convert_yuyv_image_to_rgb( state->bufferList[latestImageIndex].start,
                                               state->bufferList[latestImageIndex].length,
@@ -792,8 +808,9 @@ static bool add_ppm_header( char *buf,
         } while ( quotient > 0 );
     }
 
-    //char ppm_header[]="P6\n#9999999999 sec 9999999999 usec \n"HRES_STR" "VRES_STR"\n255\n"
+    //char ppm_header[]="P6\n#uname\n#9999999999 sec 9999999999 usec \n"HRES_STR" "VRES_STR"\n255\n"
     calculatedStampSize = 3 + // P6\n
+                          unameBufLen + 2 + // #<uname -a result>\n
                           33 + // #9999999999 sec 9999999999 usec \n
                           resolutionStrLen + 2 + //HRES_STR VRES_STR\n
                           4; // 255\n
@@ -807,7 +824,8 @@ static bool add_ppm_header( char *buf,
     }
     
     sprintf( buf,
-             "P6\n#%010u sec %010u usec \n%u %u\n255\n",
+             "P6\n#%s\n#%010u sec %010u usec \n%u %u\n255\n",
+             unameBuf,
              seconds,
              microSeconds,
              horizontalResolution,
@@ -869,6 +887,77 @@ static int convert_yuyv_image_to_rgb( char *yuyvBufIn,
     }
 
     return newi;
+}
+
+/******************************************************************************
+ *
+ * addCoolBorder
+ *
+ *
+ * Description: Adds a border to the frame that is very blue.
+ *
+ * Arguments:   yuyvBufIn (IN): buffer holding an image in YUYV format.
+ *
+ *              yuyvBufLen (IN): Size, in bytes, of the YUYV image.
+ *
+ *              pixelsPerLine (IN):  How many pixels are in each line of the
+ *                                   image.
+ *
+ * Return:      N/A
+ *
+ *****************************************************************************/
+static void addCoolBorder( char *yuyvBufIn, int yuyvBufLen, int pixelsPerLine )
+{
+    int i;
+    int j;
+    int yuyvBytesPerLine = 2 * pixelsPerLine;
+    unsigned char *pptr = (unsigned char *)yuyvBufIn;
+
+    // top border
+    for ( i = 0; i < yuyvBufLen / 16; i += 4 )
+    {
+        pptr[i + 1] |= 0xff; // Max out U (Cb)
+    }
+
+    for ( i = yuyvBufLen / 16;
+          i < yuyvBufLen - yuyvBufLen / 16;
+          i += yuyvBytesPerLine )
+    {
+        // left border
+        //for( j = 0; j < yuyvBytesPerLine / 16; j += 4 )
+        //{
+        //    pptr[i + j + 1] |= 0xff; // Max out U (Cb)
+        //}
+
+        // Left and right borders
+        // not sure why the leftmost and rightmost border starts are bounded as
+        // follows
+        // leftmost: from ( yuyvBytesPerLine / 16 ) * 4
+        //           to ( yuyvBytesPerLine / 16 ) * 5
+        // rightmost: from ( yuyvBytesPerLine / 16 ) * 3
+        //            to ( yuyvBytesPerLine / 16 ) * 4
+        for( j = ( yuyvBytesPerLine / 16 ) * 3;
+             j < ( yuyvBytesPerLine / 16 ) * 5;
+             j += 4 )
+        {
+            pptr[i + j + 1] |= 0xff; // Max out U (Cb)
+        }
+
+        // right border
+        //for( j = yuyvBytesPerLine - yuyvBytesPerLine / 16;
+        //     j < yuyvBytesPerLine;
+        //     j += 4 )
+        //{
+        //    pptr[i + j + 1] |= 0xff; // Max out U (Cb)
+        //}
+    }
+
+    // bottom border
+    for ( i = yuyvBufLen - yuyvBufLen / 16; i < yuyvBufLen; i += 4 )
+    {
+        pptr[i + 1] |= 0xff; // Max out U (Cb)
+    }
+    
 }
     
 
