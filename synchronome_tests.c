@@ -44,6 +44,7 @@ int main( int argc, char *argv[] )
         printf("start_captureing return: %i\n", isPass );
     }
 
+    //printf ("state address 1 %p\n", &cameraState );
     isPass = run_test_services( &cameraState );
     if ( isPass == false )
     {

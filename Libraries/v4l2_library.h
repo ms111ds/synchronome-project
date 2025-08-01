@@ -25,12 +25,17 @@
 #ifndef _V4L2_LIBRARY_H
 #define _V4L2_LIBRARY_H
 
+#define NUM_CAMERA_BUFFERS 2
+#define MAX_HEADER_SIZE 128
+
 enum io_method 
 {
         IO_METHOD_READ,
         IO_METHOD_MMAP,
         IO_METHOD_USERPTR,
 };
+
+
 
 struct buffer 
 {
@@ -45,6 +50,11 @@ struct v4l2_state {
     struct v4l2_format formatData;
     unsigned int numBuffers;
     struct buffer *bufferList;
+    int curBufIndex;
+    char *outBuffer;
+    unsigned int outBufferSize;
+    unsigned int outDataSize;
+    struct timespec outDataTimeStamp;
 };
 
 #endif // #ifndef _V4L2_LIBRARY_H
@@ -59,3 +69,5 @@ bool init_device( enum io_method ioMethod,
 bool uninit_device( struct v4l2_state *state );
 bool start_capturing( struct v4l2_state *state );
 bool stop_capturing( struct v4l2_state *state );
+bool queue_stream_bufs( int buf_index, struct v4l2_state *state );
+bool read_frame_stream( int *bufIndex, struct v4l2_state *state );

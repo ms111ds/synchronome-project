@@ -9,4 +9,24 @@ void errno_print(const char *s)
         fprintf(stderr, "%s error %d, %s\n", s, errno, strerror(errno));
 }
 
+/******************************************************************************
+ *
+ * timespec_to_double_us
+ *
+ * Description: Conversts a struct timespec value to a double precision
+ *              floating point representing micro seconds.
+ *
+ * Arguments:   ts (IN): struct timespec value to be converted to floating
+ *                       point (double precision).
+ *
+ * Return:      Floating point number representing seconds.
+ *
+ *****************************************************************************/
+double timespec_to_double_us( struct timespec *ts )
+{
+    return ( (double)ts->tv_sec * 1000000.0 ) +
+           ( (double)ts->tv_nsec / 1000.0 );
+}
+
+
 #endif // #ifndef _COMMON_LIB_C

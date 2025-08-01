@@ -3,7 +3,7 @@
 #ifndef _V4L2_LIBRARY_C
 #define _V4L2_LIBRARY_C
 
-#define NUM_BUFFERS 4
+
 
 
 
@@ -37,7 +37,7 @@ static int xioctl(int fh, int request, void *arg)
  *              to directly access the camera's kernel space buffers. The camera
  *              directly writes to this buffer and the application can then read
  *              it. The total number of buffers will be determined by the video
- *              capture device after a request for NUM_BUFFERS buffers is
+ *              capture device after a request for NUM_CAMERA_BUFFERS buffers is
  *              sent by the application.
  *
  * Arguments:   state - v4l2 state with the information of an open video device. 
@@ -53,12 +53,12 @@ static bool init_mmap( struct v4l2_state *state )
     bool isSuccess = false;
     int numMaps = 0;
 
-    // Request a number (NUM_BUFFERS) of buffers within the video capture
+    // Request a number (NUM_CAMERA_BUFFERS) of buffers within the video capture
     // device's memory for use by the application to read images captured
     // by the device.
     memset(&req, '\0', sizeof(req) );
 
-    req.count = NUM_BUFFERS;
+    req.count = NUM_CAMERA_BUFFERS;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
 
@@ -228,7 +228,7 @@ bool open_device( char *deviceName, struct v4l2_state *state )
     }
 
     //fd = open(dev_name, O_RDWR /* required */ | O_NONBLOCK, 0);
-    fd = open( deviceName, O_RDWR /* required */, 0);
+    fd = open( deviceName, O_RDWR, 0);
 
     if ( -1 == fd )
     {
@@ -440,14 +440,17 @@ bool init_device( enum io_method ioMethod,
     }
     else
     {
-        printf("LET CAMERA DECIDE FORMAT\n");
-        /* Preserve original settings as set by v4l2-ctl for example */
-        if ( -1 == xioctl( state->fileDescriptor, VIDIOC_G_FMT, &formatData ) )
-        {
-            isSuccess = false;
-            errno_print( "VIDIOC_G_FMT" );
-            goto END;
-        }
+        printf( "width and height of frames must be specified\n" );
+        isSuccess = false;
+        goto END;
+        //printf("LET CAMERA DECIDE FORMAT\n");
+        ///* Preserve original settings as set by v4l2-ctl for example */
+        //if ( -1 == xioctl( state->fileDescriptor, VIDIOC_G_FMT, &formatData ) )
+        //{
+        //    isSuccess = false;
+        //    errno_print( "VIDIOC_G_FMT" );
+        //    goto END;
+        //}
     }
 
     /* Buggy driver paranoia. */
@@ -462,6 +465,17 @@ bool init_device( enum io_method ioMethod,
     {
         formatData.fmt.pix.sizeimage = min;
     }
+
+    // create buffer to hold RGB frame for processing
+    state->outBufferSize = MAX_HEADER_SIZE +
+                           ( numHorizontalPixels * numVerticalPixels ) * 3;
+    state->outBuffer = (char *)malloc( state->outBufferSize );
+    if ( state->outBuffer == NULL )
+    {
+        errno_print( "malloc frame" );
+        goto END;
+    }
+    
 
     // Initialize selected I/O method
     switch ( ioMethod )
@@ -547,10 +561,9 @@ bool uninit_device( struct v4l2_state *state )
             break;
     }
 
+    free ( state->outBuffer );
     free( state->bufferList );
-    state->numBuffers = 0;
-    state->bufferList = NULL;
-    memset( &(state->formatData), '\0', sizeof(state->formatData) );
+    memset( state, '\0', sizeof(*state) );
 
     return isOk;
 }
@@ -655,5 +668,194 @@ bool stop_capturing( struct v4l2_state *state )
 
     return isPass;
 }
+
+
+/******************************************************************************
+ *
+ * queue_stream_bufs
+ *
+ *
+ * Description: Provide a buffer to the video capture device so that it so that
+ *              the device can load a new image to it. For streaming I/O only,
+ *              i.e. IO_METHOD_MMAP and IO_METHOD_USERPTR
+ *
+ * Arguments:   buf_index (IN): Index of the buffer we are placing the image.
+ *                              (frame) data in.
+ *
+ * state - v4l2 state with the information of an open video device. 
+ *
+ * Return:      true if successful, false otherwise.
+ *
+ *****************************************************************************/
+bool queue_stream_bufs( int buf_index, struct v4l2_state *state )
+{
+    struct v4l2_buffer buf;
+    bool isPass = false;
+
+    // call the ioctl VIDIOC_QBUF command to tell the video capture device
+    // that a buffer is once again available for it to 
+    switch ( state->ioMethod )
+    {
+        case IO_METHOD_READ:
+            printf( "read()/write() I/O currently not supported\n" );
+            break;
+            
+    	case IO_METHOD_MMAP:
+            //printf( "buf_index = %i\n", buf_index );
+    	    memset( &buf, '\0', sizeof(buf) );
+            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            buf.index = buf_index;
+    	
+    	    if (-1 == xioctl( state->fileDescriptor, VIDIOC_QBUF, &buf))
+            {
+    	        errno_print("VIDIOC_QBUF");
+            }
+            else
+            {
+                isPass = true;
+            }
+    	
+    	    break;
+    	
+    	case IO_METHOD_USERPTR:
+            
+    	    //CLEAR(buf);
+            //buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            //buf.memory = V4L2_MEMORY_USERPTR;
+            //buf.index = buf_index;
+            //buf.m.userptr = (unsigned long)buffers[buf_index].start;
+            //buf.length = buffers[buf_index].length;
+    	    //
+    	    //if (-1 == xioctl(fd, VIDIOC_QBUF, &buf))
+    	    //    errno_exit("VIDIOC_QBUF");
+            printf( "user pointer I/O currently not supported\n" );
+            
+    	    break;
+            
+        default:
+            break;
+    }
+    //syslog( LOG_INFO,"%s LOAD SRV enqueued... buf %i\n", p_assignment_str, buf_index );
+
+    //printf("R");
+    return isPass;
+}
+
+
+/******************************************************************************
+ *
+ * read_frame_stream
+ *
+ *
+ * Description: Obtain a captured frame from one of the streaming I/O
+ *              methods, i.e IO_METHOD_MMAP and IO_METHOD_USERPTR.
+ *
+ * Arguments:   bufIndex (OUT): Index of the buffer we are placing the image.
+ *                              (frame) data in.
+ *
+ * state - v4l2 state with the information of an open video device. 
+ *
+ * Return:      true if successful, false otherwise.
+ *
+ *****************************************************************************/
+bool read_frame_stream( int *bufIndex, struct v4l2_state *state )
+{
+    struct v4l2_buffer buf;
+    //unsigned int i;
+    bool isPass = false;
+    //int rv = -1;
+
+    
+    switch ( state->ioMethod )
+    {
+        case IO_METHOD_READ:
+            printf( "read()/write() I/O currently not supported\n" );
+            break;
+    	case IO_METHOD_MMAP:
+    	    memset( &buf, '\0', sizeof(buf) );
+    	
+    	    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    	    buf.memory = V4L2_MEMORY_MMAP;
+            
+    	    // Allow to application access to the buffer filled with the image
+            // for MMAP it is on the video capture device.
+            //
+            // VIDIOC_DQBUF will update buf with the currect buffer index to
+            // where the video capture device stored the image.
+            //
+            // NOTE DEQUEUE BUFFER BLOCKS IF O_NONBLOCK WAS NOT SET WHEN OPENING
+            // THE CAMERA.
+    	    if (-1 == xioctl( state->fileDescriptor, VIDIOC_DQBUF, &buf) )
+    	    {
+                errno_print("VIDIOC_DQBUF");
+                break;
+    	    }
+            else if ( buf.index < state->numBuffers )
+            {
+                // go here if dequeued buffer is one of those that we requested
+                // and return buffer info
+                state->bufferList[buf.index].length = buf.bytesused;
+                *bufIndex = buf.index;
+                state->curBufIndex = buf.index;
+                isPass = true;
+                //printf( "buf length = %i\n", buf.bytesused );
+            }
+
+    	    break;
+    	
+    	case IO_METHOD_USERPTR:
+    	    printf( "user pointer I/O currently not supported\n" );
+    	    break;
+            
+        default:
+            errno_print("read_frame_stream(): unknown i/o");
+    }
+
+    //printf("R");
+    return isPass;
+}
+
+/******************************************************************************
+ *
+ * is_image_ready
+ *
+ *
+ * Description: Checks if the video capture device has already loaded the image
+ *              into the selected buffer. This is only used from streamin I/O
+ *              methods, i.e IO_METHOD_MMAP and IO_METHOD_USERPTR.
+ *
+ * Arguments:   buf_index (IN): Index of the buffer we are verifying.
+ *
+ * Return:      1 if frame is ready for access by the application or the I/O
+ *              method is not applicable ( IO_METHOD_READ ). 0 otherwise.
+ *
+ *****************************************************************************/
+//int is_image_ready( int buf_index )
+//{
+//    int rv = 0;
+//    struct v4l2_buffer buf_info = { 0 };
+//
+//    if ( ( io == IO_METHOD_MMAP ) || ( io == IO_METHOD_USERPTR ) )
+//    {
+//    	buf_info.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+//    	buf_info.index = buf_index;
+//    	
+//    	if ( -1 != xioctl(fd, VIDIOC_QUERYBUF, &buf_info ) )
+//    	{
+//    	    if ( buf_info.flags & V4L2_BUF_FLAG_DONE )
+//    	    {
+//    	        rv = 1;
+//    	    }
+//    	}
+//    }
+//    else
+//    {
+//        rv = 1;
+//    }
+//
+//    return rv;
+//}
+
 
 #endif // #ifndef _V4L2_LIBRARY_C

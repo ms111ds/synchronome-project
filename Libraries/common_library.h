@@ -15,3 +15,4 @@
 #endif // #ifndef _COMMON_LIB_H
 
 void errno_print(const char *s);
+double timespec_to_double_us( struct timespec *ts );

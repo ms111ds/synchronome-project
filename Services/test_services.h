@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <float.h>
 #include <mqueue.h>
 #include <pthread.h>
 #include <sched.h>
