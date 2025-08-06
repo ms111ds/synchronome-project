@@ -1,7 +1,7 @@
 #include "test_services.h"
 
-#ifndef _TEST_SRV_C
-#define _TEST_SRV_C
+#ifndef _SYNCHRONOME_SRV_C
+#define _SYNCHRONOME_SRV_C
 
 #define CORE_0 0
 #define CORE_1 1
@@ -79,7 +79,7 @@ static void print_scheduler(void);
 
 /******************************************************************************
  *
- * run_test_services
+ * run_synchronome
  *
  *
  * Description: Starts the starter thread (real-time thread).
@@ -89,7 +89,7 @@ static void print_scheduler(void);
  * Return:      true if successful, false otherwise.
  *
  *****************************************************************************/
-bool run_test_services( struct v4l2_state *state )
+bool run_synchronome( struct v4l2_state *state )
 {
     int threadMaxPriority;
     bool isPass = false;
@@ -1091,4 +1091,4 @@ static void print_scheduler( void )
    }
 }
 
-#endif // #ifndef _TEST_SRV_C
+#endif // #ifndef _SYNCHRONOME_SRV_C

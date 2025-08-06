@@ -16,7 +16,7 @@ CE = $(addprefix -iquote ,$(INCLUDE_DIRS))
 
 .PHONY: all clean remake
 
-all: synchronome_tests
+all: synchronome_tests synchronome_program
 
 
 clean:
@@ -25,7 +25,7 @@ clean:
 	                   -name "*.ppm" -o \
 	                   -name "*.pgm" -o \
 	                   -name "*~" \) -delete
-	-rm -f synchronome_tests
+	-rm -f synchronome_tests synchronome_program
 
 remake: clean all
 
@@ -38,10 +38,19 @@ v4l2_library.o: ./Libraries/v4l2_library.c common_library.o
 test_services.o: ./Services/test_services.c common_library.o
 	$(CC) $(CFLAGS) -c $<
 	
+synchronome_services.o: ./Services/synchronome_services.c common_library.o
+	$(CC) $(CFLAGS) -c $<
+	
 synchronome_tests.o: synchronome_tests.c common_library.o
+	$(CC) $(CFLAGS) -c $<
+	
+synchronome_program.o: synchronome_program.c common_library.o
 	$(CC) $(CFLAGS) -c $<
 
 synchronome_tests: synchronome_tests.o v4l2_library.o test_services.o common_library.o
+	$(CC) $(LDFLAGS) $(CFLAGS) $^ -o $@ $(LIBS)
+	
+synchronome_program: synchronome_program.o v4l2_library.o synchronome_services.o common_library.o
 	$(CC) $(LDFLAGS) $(CFLAGS) $^ -o $@ $(LIBS)
 
 %.o: %.c
