@@ -8,24 +8,58 @@
 #define CORE_2 2
 #define CORE_3 3
 
+#define TO_PROCESSING_MQ "/to_processing_mq"
+#define TO_SELECTION_MQ "/to_selection_mq"
+
+#define MILLI_TO_NANO 1000000
+#define UNIT_TIME_MS 20
+#define T_LOAD_SELECT 5
+
 struct thread_args
 {
     struct v4l2_state *state;
 };
 
-pthread_attr_t     attrTest;
-pthread_t          threadTest;
-struct sched_param paramsTest;
+struct load_to_select_msg
+{
+    char *buf1;
+    char *buf2;
+    unsigned int bufLen;
+};
+
+struct load_to_select_msg
+{
+    char *buf1;
+    char *buf2;
+    unsigned int bufLen;
+};
+
+struct select_to_process_msg
+{
+    char *buf;
+    unsigned int bufLen;
+};
+
+pthread_attr_t     attrLoad;
+pthread_t          threadLoad;
+struct sched_param paramsLoad;
+
+pthread_attr_t     attrSelect;
+pthread_t          threadSelect;
+struct sched_param paramsSelect;
+
+pthread_attr_t     attrProcessWrite;
+pthread_t          threadProcessWrite;
+struct sched_param paramsProcessWrite;
 
 pthread_attr_t     attrStarter;
 pthread_t          threadStarter;
 struct sched_param paramsStarter;
 
-sem_t semImageLoader;
-sem_t semImageSelector;
-sem_t semImageProcessor;
-sem_t semImageWriter;
-pthread_mutex_t mutexTest;
+sem_t semLoad;
+sem_t semSelect;
+pthread_mutex_t mutexSynchronome;
+
 unsigned int sequencePeriods = 60;
 unsigned int remainingSequencePeriods;
 
@@ -52,7 +86,7 @@ static bool set_thread_attributes( pthread_attr_t *attr,
                                    int affinity );
 static void *starter( void *threadp );
 void sequencer( int id );
-static void *service_test( void *threadp );
+static void *service_load_and_selec( void *threadp );
 static bool loadImage( struct v4l2_state *state );
 static bool selectImage ( struct v4l2_state *state );
 static bool processImage( struct v4l2_state *state );
@@ -75,6 +109,7 @@ static void yuv2rgb(int y,
                     unsigned char *g,
                     unsigned char *b);
 static void addCoolBorder( char *yuyvBufIn, int yuyvBufLen, int pixelsPerLine );
+static bool init_message_queue( mqd_t *mqDescriptor, char *mqName );
 static void print_scheduler(void);
 
 /******************************************************************************
@@ -105,16 +140,10 @@ bool run_synchronome( struct v4l2_state *state )
     pclose( unameOutput );
     unameBufLen = (unsigned int)strlen( unameBuf );
     
-    //if ( init_buffer_status_array() != 0 )
-    //{
-    //    exit(EXIT_FAILURE);
-    //}
 
-    // Unlink is needed in case the
-    // the message queues already exist. This call will delete these already
-    // existing ones.
-    //mq_unlink( TO_PROCESSING_MQ );
-    //mq_unlink( FROM_PROCESSING_MQ );
+    // Delete the message queues if they already exists
+    mq_unlink( TO_SELECTION_MQ );
+    mq_unlink( TO_PROCESSING_MQ );
 
     // Set thread attributes of the image loading service, the image processing
     // service and the scheduler.
@@ -156,6 +185,10 @@ bool run_synchronome( struct v4l2_state *state )
         errno_print( "error joining with starter service\n");
         goto END;
     }
+
+    // clean up message queue when finished
+    mq_unlink( TO_SELECTION_MQ );
+    mq_unlink( TO_PROCESSING_MQ );
 
 END:
 
@@ -267,80 +300,134 @@ static void *starter( void *threadp )
     struct itimerspec intervalTime = { {1,0}, { 1,0 } };
     struct itimerspec oldIntervalTime = { {1,0}, { 1,0 } };
     int flags = 0;
-    bool isOkSemL = false;
-    bool isOkSemS = false;
-    bool isOkSemP = false;
-    bool isOkSemW = false;
+    bool isOkLoadSem = false;
+    bool isOkSelectSem = false;
+    bool isMutAttrCreated = false;
     bool isMutCreated = false;
+    pthread_mutexattr_t mutex_attributes;
 
     printf( "starter " );
     print_scheduler( );
 
     // Initialize semaphores
-    if ( sem_init( &semImageLoader, 0, 0 ) != 0 )
+    if ( sem_init( &semLoad, 0, 0 ) != 0 )
     {
         errno_print( "semaphore init" );
         goto END;
     }
-    isOkSemL = true;
+    isOkLoadSem = true;
 
-    if ( sem_init( &semImageSelector, 0, 0 ) != 0 )
+    if ( sem_init( &semSelect, 0, 0 ) != 0 )
     {
         errno_print( "semaphore init" );
         goto END;
     }
-    isOkSemS = true;
+    isOkSelectSem = true;
 
-    if ( sem_init( &semImageProcessor, 0, 0 ) != 0 )
+
+
+    // Initialize mutex with priority inheritance
+    if ( pthread_mutexattr_init( &mutex_attributes ) != 0 )
     {
-        errno_print( "semaphore init" );
+        errno_print( "mutex attributes init" );
         goto END;
     }
-    isOkSemP = true;
 
-    if ( sem_init( &semImageWriter, 0, 0 ) != 0 )
+    isMutAttrCreated = true;
+
+    if ( pthread_mutexattr_setprotocol( &mutex_attributes,
+                                        PTHREAD_PRIO_INHERIT ) != 0 )
     {
-        errno_print( "semaphore init" );
+        errno_print( "mutex attributes set protocol" );
         goto END;
     }
-    isOkSemW = true;
-
-    // Initialize mutexes
-    if ( pthread_mutex_init(&mutexTest, NULL) != 0 )
+    if ( pthread_mutex_init( &mutexSynchronome, &mutex_attributes ) != 0 )
     {
         errno_print( "mutex init" );
         goto END;
     }
+
+    
     isMutCreated = true;
 
-    // Set thread attributes for the service that will carry out all tests.
     threadMaxPriority = sched_get_priority_max( MY_SCHED_POLICY );
     if ( threadMaxPriority == -1 )
     {
         errno_print("error getting minimum priority");
         goto END;
     }
+    
+    
+    // Set thread attributes for the servicea that do the image loading and
+    // image selection (HIGH PRIORITY).
 
-    isPass = set_thread_attributes( &attrTest,
-                                    &paramsTest,
+
+    isPass = set_thread_attributes( &attrLoad,
+                                    &paramsLoad,
                                     MY_SCHED_POLICY,
                                     threadMaxPriority - 1,
                                     CORE_3 );
     if ( isPass != true )
     {
-        fprintf(stderr, "set_thread_attributes: starter service\n");
+        fprintf(stderr, "set_thread_attributes: load service\n");
+        goto END;
+    }
+
+    isPass = set_thread_attributes( &attrSelect,
+                                    &paramsSelect,
+                                    MY_SCHED_POLICY,
+                                    threadMaxPriority - 2,
+                                    CORE_3 );
+    if ( isPass != true )
+    {
+        fprintf(stderr, "set_thread_attributes: select service\n");
+        goto END;
+    }
+
+    // Set thread attributes for the service that does the image processing and
+    // image writing (SLACK STEALER).
+    isPass = set_thread_attributes( &attrProcessWrite,
+                                    &paramsProcessWrite,
+                                    MY_SCHED_POLICY,
+                                    threadMaxPriority - 3,
+                                    CORE_3 );
+    if ( isPass != true )
+    {
+        fprintf(stderr, "set_thread_attributes: process + write service\n");
         goto END;
     }
 
 
-    // Create the testing service thread.
-    rv =  pthread_create(&threadTest,  // pointer to thread descriptor
-                         &attrTest,    // use specific attributes
-                         service_test, // thread function entry point
+    // Create the service thread that handles image loading.
+    rv =  pthread_create(&threadLoad,  // pointer to thread descriptor
+                         &attrLoad,    // use specific attributes
+                         service_load, // thread function entry point
                          threadp );    // parameters to pass in
     if ( rv < 0 )
     {
-        errno_print( "error creating test service\n" );
+        errno_print( "error creating load service\n" );
+        goto END;
+    }
+
+    // Create the service thread that handles image selection.
+    rv =  pthread_create(&threadSelect,  // pointer to thread descriptor
+                         &attrSelect,    // use specific attributes
+                         service_select, // thread function entry point
+                         threadp );    // parameters to pass in
+    if ( rv < 0 )
+    {
+        errno_print( "error creating select service\n" );
+        goto END;
+    }
+
+    // Create the service thread that handles image processing and writing.
+    rv =  pthread_create(&threadProcessWrite,  // pointer to thread descriptor
+                         &attrProcessWrite,    // use specific attributes
+                         service_process_and_write, // thread function entry point
+                         threadp );    // parameters to pass in
+    if ( rv < 0 )
+    {
+        errno_print( "error creating process + write service\n" );
         goto END;
     }
 
@@ -352,18 +439,25 @@ static void *starter( void *threadp )
     signal(SIGALRM, (void(*)()) sequencer);
 
     intervalTime.it_interval.tv_sec = 0;
-    intervalTime.it_interval.tv_nsec = 100000000; // refill timer with this
+    intervalTime.it_interval.tv_nsec = UNIT_TIME_MS * MILLI_TO_NANO; // refill timer with this
     intervalTime.it_value.tv_sec = 0;
-    intervalTime.it_value.tv_nsec = 1; // initial value. start ASAP.
+    intervalTime.it_value.tv_nsec = UNIT_TIME_MS * MILLI_TO_NANO; // initial value.
 
     timer_settime( sequencerTimer, flags, &intervalTime, &oldIntervalTime );
 
 
-    // Wait for the test service thread to complete
-    rv = pthread_join( threadTest, NULL );
+    // Wait for the load and select services thread to complete
+    rv = pthread_join( threadLoad, NULL );
     if ( rv < 0)
     {
-        fprintf(stderr, "error joining with test service\n");
+        errno_print( "error joining with load + select service\n");
+    }
+    
+    // Wait for the process and write services thread to complete
+    rv = pthread_join( threadProcessWrite, NULL );
+    if ( rv < 0)
+    {
+        errno_print( "error joining with process + write service\n");
     }
 
     // Disable the timer
@@ -375,11 +469,14 @@ static void *starter( void *threadp )
 
 END:
 
-    if ( isOkSemL == true ) sem_destroy( &semImageLoader );
-    if ( isOkSemS == true ) sem_destroy( &semImageSelector );
-    if ( isOkSemP == true ) sem_destroy( &semImageProcessor );
-    if ( isOkSemW == true ) sem_destroy( &semImageWriter );
-    if ( isMutCreated == true ) pthread_mutex_destroy( &mutexTest );
+    if ( isOkLoadSem == true ) sem_destroy( &semLoad );
+    if ( isOkSelectSem == true ) sem_destroy( &semSelect );
+    if ( isMutAttrCreated == true )
+    {
+        pthread_mutexattr_destroy( &mutex_attributes );
+    }
+    if ( isMutCreated == true ) pthread_mutex_destroy( &mutexSynchronome );
+    
     return (void *)NULL;
 }
 
@@ -398,190 +495,168 @@ END:
  *****************************************************************************/
 void sequencer(int id)
 {
+    static unsigned int curPeriod = 0;
     //printf( "in the SE-SE-SEQUENCER!!\n" );
-    pthread_mutex_lock( &mutexTest );
-    if ( remainingSequencePeriods > 0 ) remainingSequencePeriods--;
-    pthread_mutex_unlock( &mutexTest );
-    sem_post( &semImageLoader );
-    sem_post( &semImageSelector );
-    sem_post( &semImageProcessor );
-    sem_post( &semImageWriter );
+
+    pthread_mutex_lock( &mutexsynchronome );
+    if ( remainingSequencePeriods > 0 )
+    {
+        remainingSequencePeriods--;
+    }
+    
+    pthread_mutex_unlock( &mutexSynchronome );
+    if ( ( curPeriod % T_LOAD_SELECT ) == 0 )
+    {
+        sem_post( &semLoad );
+        sem_post( &semSelect );
+    }
+
+    curPeriod ++;
 }
 
 
 /******************************************************************************
  *
- * service_test
+ * service_load
  *
  *
- * Description: runs the tests.
+ * Description: runs the image loading service. Will queue up buffers for v4l2
+ *              to store image data in and send buffers to the selection
+ *              service.
  *
  * Arguments:   threadp (IN): Contains the parameters to be used by the tests.
  *
  * Return:      Null pointer
  *
  *****************************************************************************/
-static void *service_test( void *threadp )
+static void *service_load( void *threadp )
 {
-    bool isFinal = false;
+    bool isServiceContinue = true;
+    bool isMqCreated = false;
+    bool isFail = false;
     struct timespec startTime;
     struct timespec endTime;
     double deltaTimeUs;
-    static int curRun = 0;
+    int curRun = 0;
     struct v4l2_state *state = ( (struct thread_args *)threadp )->state;
+    mqd_t mq_to_selection;
+    bool rv;
+    int curBuf;
+    int prevBuf;
+    int prevPrevBuf;
+    struct load_to_select_msg msgOut;
+    int mmapIdx1;
+    int mmapIdx2;
+    
 
-
-    // Initialize values for performance measurments
-    imageLoaderCumulativeTime = 0.0;
-    imageLoaderMaxTime = DBL_MIN;
-    imageLoaderMinTime = DBL_MAX;
-    imageSelectorCumulativeTime = 0.0;
-    imageSelectorMaxTime = DBL_MIN;
-    imageSelectorMinTime = DBL_MAX;
-    imageProcessorCumulativeTime = 0.0;
-    imageProcessorMaxTime = DBL_MIN;
-    imageProcessorMinTime = DBL_MAX;
-    imageWriterCumulativeTime = 0.0;
-    imageWriterMaxTime = DBL_MIN;
-    imageWriterMinTime = DBL_MAX;
-
-    // fill up one out of 2 image buffers. Once we have 2 image buffers, we can
-    // start comparing images.
-    loadImage( state );
-
-    while ( true )
+    rv = init_message_queue( &mq_to_selection, TO_SELECTION_MQ );
+    if ( rv == false )
     {
-        curRun++;
-
-        // IMAGE LOADER CODE
-        sem_wait( &semImageLoader );
-        clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
-
-        loadImage( state ); // ACTUAL TEST HERE
-
-        clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
-        deltaTimeUs = timespec_to_double_us( &endTime ) -
-                      timespec_to_double_us( &startTime );
-        imageLoaderCumulativeTime += deltaTimeUs;
-        if ( deltaTimeUs > imageLoaderMaxTime )
-        {
-            imageLoaderMaxTime = deltaTimeUs;
-        }
-        if ( deltaTimeUs < imageLoaderMinTime )
-        {
-            imageLoaderMinTime = deltaTimeUs;
-        }
-        syslog(LOG_CRIT,
-               "synchronome service test round %i: %9.3lf us (image load)\n",
-               curRun,
-               deltaTimeUs );
+        isFail = true;
+        goto END;
+    }
+    isMqCreated = true;
 
 
-        // IMAGE SELECTOR CODE
-        sem_wait( &semImageSelector );
-        clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
+    // Load the first image. Will need 2 to start selecting valid images by
+    // comparing them.
+    if ( queue_stream_bufs( 1, state ) == false )
+    {
+       isFail = true;
+       goto END;
+    }
+    
+    sem_wait( &semLoad );
 
-        selectImage( state ); // ACTUAL TEST HERE
-
-        clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
-        deltaTimeUs = timespec_to_double_us( &endTime ) -
-                      timespec_to_double_us( &startTime );
-        imageSelectorCumulativeTime += deltaTimeUs;
-        if ( deltaTimeUs > imageSelectorMaxTime )
-        {
-            imageSelectorMaxTime = deltaTimeUs;
-        }
-        if ( deltaTimeUs < imageSelectorMinTime )
-        {
-            imageSelectorMinTime = deltaTimeUs;
-        }
-        syslog(LOG_CRIT,
-               "synchronome service test round %i: %9.3lf us (image select)\n",
-               curRun,
-               deltaTimeUs );
-
-
-        // IMAGE PROCESSOR CODE
-        sem_wait( &semImageProcessor );
-        clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
-
-        processImage( state ); // ACTUAL TEST HERE
-
-        clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
-        deltaTimeUs = timespec_to_double_us( &endTime ) -
-                      timespec_to_double_us( &startTime );
-        imageProcessorCumulativeTime += deltaTimeUs;
-        if ( deltaTimeUs > imageProcessorMaxTime )
-        {
-            imageProcessorMaxTime = deltaTimeUs;
-        }
-        if ( deltaTimeUs < imageProcessorMinTime )
-        {
-            imageProcessorMinTime = deltaTimeUs;
-        }
-        syslog(LOG_CRIT,
-               "synchronome service test round %i: %9.3lf us (image process)\n",
-               curRun,
-               deltaTimeUs );
-
-
-        
-
-        // IMAGE WRITER CODE
-        sem_wait( &semImageWriter );
-        clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
-
-        writeImage( state, curRun ); // ACTUAL TEST HERE
-
-        clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
-        deltaTimeUs = timespec_to_double_us( &endTime ) -
-                      timespec_to_double_us( &startTime );
-        imageWriterCumulativeTime += deltaTimeUs;
-        if ( deltaTimeUs > imageWriterMaxTime )
-        {
-            imageWriterMaxTime = deltaTimeUs;
-        }
-        if ( deltaTimeUs < imageWriterMinTime )
-        {
-            imageWriterMinTime = deltaTimeUs;
-        }
-        syslog(LOG_CRIT,
-               "synchronome service test round %i: %9.3lf us (image write)\n",
-               curRun,
-               deltaTimeUs );
-
-
-        // Check if service should end
-        pthread_mutex_lock( &mutexTest );
-        if ( remainingSequencePeriods == 0 ) isFinal = true;
-        pthread_mutex_unlock( &mutexTest );
-        if ( isFinal == true ) break;
+    // Read the buffer we started downloading last period.
+    if ( read_frame_stream( &mmapIdx1, state ) == false )
+    {
+        isFail = true;
+        goto END;
     }
 
-    // Print summary of performance measurements
-    syslog(LOG_CRIT,
-           "image load summary (us) max: %9.3lf, min: %9.3lf, avg: %9.3lf \n",
-           imageLoaderMaxTime,
-           imageLoaderMinTime,
-           imageLoaderCumulativeTime / (double)curRun );
+    // Load the second image. Will need 2 to start selecting valid images by
+    // comparing them.
+    if ( queue_stream_bufs( 2, state ) == false )
+    {
+       isFail = true;
+       goto END;
+    }
 
-    syslog(LOG_CRIT,
-           "image select summary (us) max: %9.3lf, min: %9.3lf, avg: %9.3lf \n",
-           imageSelectorMaxTime,
-           imageSelectorMinTime,
-           imageSelectorCumulativeTime / (double)curRun );
+    curBuf = 2;
+    prevBuf = 1;
+    prevPrevBuf = 0;
 
-    syslog(LOG_CRIT,
-           "image process summary (us) max: %9.3lf, min: %9.3lf, avg: %9.3lf \n",
-           imageProcessorMaxTime,
-           imageProcessorMinTime,
-           imageProcessorCumulativeTime / (double)curRun );
+    while ( isServiceContinue )
+    {
+        if ( sem_wait( &semLoad ) != 0 )
+        {
+            errno_print( "sem_wait load\n");
+            isFail = true;
+            goto END;
+        }
+        curRun++;
+        
+        curBuf = ( curBuf + 1 ) % NUM_CAMERA_BUFFERS;
+        prevBuf = ( prevBuf + 1 ) % NUM_CAMERA_BUFFERS;
+        prevPrevBuf = ( prevPrevBuf + 1 ) % NUM_CAMERA_BUFFERS;
 
-    syslog(LOG_CRIT,
-           "image write summary (us) max: %9.3lf, min: %9.3lf, avg: %9.3lf \n",
-           imageWriterMaxTime,
-           imageWriterMinTime,
-           imageWriterCumulativeTime / (double)curRun );
+        if ( queue_stream_bufs( curBuf, state ) == false )
+        {
+           isFail = true;
+           goto END;
+        }
+
+        // Read the buffer we started downloading last period.
+        mmapIdx2 = mmapIdx1;
+        if ( read_frame_stream( &mmapIdx1, state ) == false )
+        {
+            isFail = true;
+            goto END;
+        }
+
+        // sanity check. Ensure the last two frames read have the same length.
+        if ( state->bufferList[mmapIdx1].length !=
+             state->bufferList[mmapIdx2].length )
+        {
+            isFail = true;
+            goto END;
+        }
+
+        // Send message out to be picked up by the selection service.
+        msgOut.buf1 = state->bufferList[mmapIdx1].start;
+        msgOut.buf2 = state->bufferList[mmapIdx2].start;
+        msgOut.bufLen = state->bufferList[mmapIdx1].length;
+        if ( mq_send( mq_to_selection,
+                      (char *)&msgOut,
+                      sizeof(msgOut), 30) != 0 )
+        {
+            errno_print( "mq_send load->select\n");
+            isFail = true;
+            goto END;
+        }
+
+        pthread_mutex_lock( &mutexSynchrome );
+    	if ( remainingSequencePeriods == 0 )
+    	{
+    	    isServiceContinue = false;
+    	}
+    	pthread_mutex_unlock( &mutexSynchronome );
+
+    }
+        
+END:
+    if ( isMqCreated == true )
+    {
+        mq_close( mq_to_selection );
+    }
+
+    if ( isFail == true )
+    {
+        pthread_mutex_lock( &mutexSynchrome );
+        remainingSequencePeriods = 0; // end all services
+        pthread_mutex_unlock( &mutexSynchrome );
+    }
 
     return (void *)NULL;
 }
@@ -589,48 +664,261 @@ static void *service_test( void *threadp )
 
 /******************************************************************************
  *
- * loadImage
+ * service_select
  *
  *
- * Description: Test to see how long it takes for the camera to produce an
- *              image. First QUEUES a buffer so the camera knows a buffer is
- *              ready to write in. Then it DEQUEUES the buffer to have the
- *              application wait for the image to be loaded by the camera.
- *              This test assumes mmap (memory mapped) buffer communication
- *              between the application and the camera.
+ * Description: runs the image selection service. Recieves 2 buffers from the
+ *              image loading service and compares them. If an image meets the
+ *              selection criteria, it is sent to the process+write service.
  *
- * Arguments:   state (IN/OUT): v4l2 state with the information of an open
- *              video device.
+ * Arguments:   threadp (IN): Contains the parameters to be used by the tests.
  *
- * Return:      true if successful, false otherwise.
+ * Return:      Null pointer
  *
  *****************************************************************************/
-static bool loadImage( struct v4l2_state *state )
+static void *service_select( void *threadp )
 {
-    bool isPass = true;
-    int readyBufIndex;
+    bool isServiceContinue = true;
+    bool isMqFromLoadCreated = false;
+    bool isMqToProcessing = false;
+    bool isFail = false;
+    //struct v4l2_state *state = ( (struct thread_args *)threadp )->state;
+    mqd_t mq_from_load;
+    mqd_t mq_to_processing;
+    bool rv;
+    struct load_to_select_msg msgIn;
+    struct select_to_process_msg msgOut;
+    char *bufNewer;
+    char *bufOlder;
+    unsigned int bufLen;
+    int count = 0;
+    
 
-
-    // Tell the camera that a buffer ready to write in
-    isPass = queue_stream_bufs( state->curBufIndex,
-                                state );
-
-    // Wait for the camera to write into the buffer 
-    isPass = read_frame_stream( &readyBufIndex, state );
-
-    if ( state->curBufIndex != (unsigned)readyBufIndex )
+    rv = init_message_queue( &mq_from_load, TO_SELECTION_MQ );
+    if ( rv == false )
     {
-        printf( "load image error: current buffer = %u, dequeued buffer %i",
-                state->curBufIndex,
-                readyBufIndex );
+        isFail = true;
+        goto END;
+    }
+    isMqFromLoadCreated = true;
+
+    rv = init_message_queue( &mq_to_processing, TO_PROCESSING_MQ );
+    if ( rv == false )
+    {
+        isFail = true;
+        goto END;
+    }
+    isMqToProcessingCreated = true;
+
+
+    while ( isServiceContinue )
+    {
+        if ( sem_wait( &semSelect ) != 0 )
+        {
+            errno_print( "sem_wait select\n");
+            isFail = true;
+            goto END;
+        }
+
+        if ( mq_receive( mq_from_load,
+                         (char *)&msgIn,
+                         sizeof(msgIn),
+                         NULL ) == -1 )
+        {
+            if ( errno != EAGAIN )
+            {    
+            	errno_print( "mq_recieve select\n");
+            	isFail = true;
+            	goto END;
+            }
+        }
+        else
+        {
+            printf( "in selection task: got msg from load\n" );
+        }
+
+        bufNewer = msgIn.buf1;
+        bufOlder = msgIn.buf2;
+        bufLen = msgIn.bufLen;
+
+        //selectImage( bufNewer, bufOlder, bufLen );
+
+
+        if ( count % 4 == 0 )
+        {
+            if ( mq_send( mq_to_selection,
+                          (char *)&msgOut,
+                          sizeof(msgOut), 30) != 0 )
+            {
+                errno_print( "mq_send select->process\n");
+                isFail = true;
+                goto END;
+            }
+        }
+        count++;
+
+
+        pthread_mutex_lock( &mutexSynchrome );
+    	if ( remainingSequencePeriods == 0 )
+    	{
+    	    isServiceContinue = false;
+    	}
+    	pthread_mutex_unlock( &mutexSynchronome );
+    }
+        
+END:
+    if ( isMqFromLoadCreated == true )
+    {
+        mq_close( mq_from_load );
+    }
+    
+    if ( isMqToProcessingCreated == true )
+    {
+        mq_close( mq_to_processing );
     }
 
-    // go to the next buffer. Since we only use 2 buffers, the next will be
-    // either buffer 0 or buffer 1.
-    state->curBufIndex = ( state->curBufIndex + 1 ) & 0x1;
+    if ( isFail == true )
+    {
+        pthread_mutex_lock( &mutexSynchrome );
+        remainingSequencePeriods = 0; // end all services
+        pthread_mutex_unlock( &mutexSynchrome );
+    }
 
-    return isPass;
+    return (void *)NULL;
 }
+
+/******************************************************************************
+ *
+ * service_process_and_write
+ *
+ *
+ * Description: runs the image processing service. Whenever an image is in the
+ *              message queue, this service does any processing on it and then
+ *              writes it to a file.
+ *
+ * Arguments:   threadp (IN): Contains the parameters to be used by the tests.
+ *
+ * Return:      Null pointer
+ *
+ *****************************************************************************/
+static void *service_process_and_write( void *threadp )
+{
+    bool isServiceContinue = true;
+    bool isMCreated = false;
+    bool isFail = false;
+    //struct v4l2_state *state = ( (struct thread_args *)threadp )->state;
+    mqd_t mq_from_load;
+    mqd_t mq_to_processing;
+    bool rv;
+    struct select_to_process_msg msgIn;
+    char *buf;
+    unsigned int bufLen;
+    
+
+    rv = init_message_queue( &mq_from_selection, TO_PROCESSING_MQ );
+    if ( rv == false )
+    {
+        isFail = true;
+        goto END;
+    }
+    isMqCreated = true;
+
+
+
+    while ( isServiceContinue )
+    {
+        if ( mq_receive( mq_from_load,
+                         (char *)&msgIn,
+                         sizeof(msgIn),
+                         NULL ) == -1 )
+        {
+            if ( errno != EAGAIN )
+            {    
+            	errno_print( "mq_recieve process+write\n");
+            	isFail = true;
+            	goto END;
+            }
+        }
+        else
+        {
+            printf( "process + write task recieved msg\n" );
+        }
+
+        buf = msgIn.buf;
+        bufLen = msgIn.bufLen;
+
+
+
+
+        pthread_mutex_lock( &mutexSynchrome );
+    	if ( remainingSequencePeriods == 0 )
+    	{
+    	    isServiceContinue = false;
+    	}
+    	pthread_mutex_unlock( &mutexSynchronome );
+    }
+        
+END:
+    if ( isMqCreated == true )
+    {
+        mq_close( mq_from_selection );
+    }
+
+    if ( isFail == true )
+    {
+        pthread_mutex_lock( &mutexSynchrome );
+        remainingSequencePeriods = 0; // end all services
+        pthread_mutex_unlock( &mutexSynchrome );
+    }
+
+    return (void *)NULL;
+}
+
+
+///******************************************************************************
+// *
+// * loadImage
+// *
+// *
+// * Description: Test to see how long it takes for the camera to produce an
+// *              image. First QUEUES a buffer so the camera knows a buffer is
+// *              ready to write in. Then it DEQUEUES the buffer to have the
+// *              application wait for the image to be loaded by the camera.
+// *              This test assumes mmap (memory mapped) buffer communication
+// *              between the application and the camera.
+// *
+// * Arguments:   state (IN/OUT): v4l2 state with the information of an open
+// *              video device.
+// *
+// * Return:      true if successful, false otherwise.
+// *
+// *****************************************************************************/
+//static bool loadImage( struct v4l2_state *state )
+//{
+//    bool isPass = true;
+//    int readyBufIndex;
+//
+//
+//    // Tell the camera that a buffer ready to write in
+//    isPass = queue_stream_bufs( state->curBufIndex,
+//                                state );
+//
+//    // Wait for the camera to write into the buffer 
+//    isPass = read_frame_stream( &readyBufIndex, state );
+//
+//    if ( state->curBufIndex != (unsigned)readyBufIndex )
+//    {
+//        printf( "load image error: current buffer = %u, dequeued buffer %i",
+//                state->curBufIndex,
+//                readyBufIndex );
+//    }
+//
+//    // go to the next buffer. Since we only use 2 buffers, the next will be
+//    // either buffer 0 or buffer 1.
+//    state->curBufIndex = ( state->curBufIndex + 1 ) & 0x1;
+//
+//    return isPass;
+//}
 
 
 /******************************************************************************
@@ -675,7 +963,7 @@ static bool selectImage( struct v4l2_state *state )
     {
         isPass = false;
     }
-    
+
     return isPass;
 }
 
@@ -1052,6 +1340,71 @@ static void yuv2rgb(int y,
    *r = r1 ;
    *g = g1 ;
    *b = b1 ;
+}
+
+
+/******************************************************************************
+ *
+ * init_message_queue
+ *
+ *
+ * Description: Creates a message queue
+ *
+ * Arguments:   mqDescriptor (OUT): descriptor for the new message queue.
+ *
+ *              mqName (OUT): name of the new message queue.
+ *
+ * Return:      true if the message queue was created successfully. Otherwise
+ *              returns false.
+ *
+ *****************************************************************************/
+static bool init_message_queue( mqd_t *mqDescriptor, char *mqName )
+{
+    bool isPass = true;
+    bool isMqCreated = false;
+    int is_init_failure = 0;
+    struct mq_attr mqAttributes;
+
+    
+    /* setup common message q attributes */
+    mqAttributes.mq_maxmsg = NUM_BUFFERS;
+    mqAttributes.mq_msgsize = sizeof( struct load_to_select_msg );
+    mqAttributes.mq_flags = O_NONBLOCK;
+    mqAttributes.mq_curmsgs = 0;
+    
+
+    // create message queue for loading service to message image processing
+    // serivce
+    *mqDescriptor = mq_open( mqName,
+                             O_CREAT|O_RDWR,
+                             S_IRWXU,
+                             &mqAttributes );
+    if ( *mqDescriptor == (mqd_t)(-1) )
+    {
+        errno_print( "init_message_queue\n" );
+        isPass = false;
+        goto END;
+    }
+
+    isMqCreated = true;
+
+   // needed since mq_open() ignores the mq_flags attribute
+    if ( mq_setattr( *mqDescriptor,
+                     &mqAttributes,
+                     NULL ) == -1 )
+    {
+        errno_print( "init_message_queue\n" );
+        isPass = false;
+    }
+
+END:
+
+    if ( ( isPass == false ) && ( isMqCreated == true ) )
+    {
+        mq_close( *mqDescriptor );
+    }
+    
+    return isPass;
 }
 
 /******************************************************************************

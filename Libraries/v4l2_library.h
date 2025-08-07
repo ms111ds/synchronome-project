@@ -25,8 +25,12 @@
 #ifndef _V4L2_LIBRARY_H
 #define _V4L2_LIBRARY_H
 
-#define NUM_CAMERA_BUFFERS 2
+#define NUM_CAMERA_BUFFERS 3 // must be 3 or greater
 #define MAX_HEADER_SIZE 128
+
+#if NUM_CAMERA_BUFFERS < 3
+#error "NUM_CAMERA_BUFFERS must be 3 or greater"
+#endif // #if NUM_CAMERA_BUFFERS < 3
 
 enum io_method 
 {
@@ -71,3 +75,4 @@ bool start_capturing( struct v4l2_state *state );
 bool stop_capturing( struct v4l2_state *state );
 bool queue_stream_bufs( int buf_index, struct v4l2_state *state );
 bool read_frame_stream( int *bufIndex, struct v4l2_state *state );
+int is_image_ready( int buf_index );

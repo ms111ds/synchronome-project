@@ -16,7 +16,10 @@
 
 #ifndef _SYNCHRONOME_SRV_H
 #define _SYNCHRONOME_SRV_H
+
 #define MY_SCHED_POLICY SCHED_FIFO
+#define NUM_MSG_QUEUE_BUFS 5
+
 #endif // #ifndef _SYNCHRONOME_SRV_H
 
 bool run_synchronome( struct v4l2_state *state );

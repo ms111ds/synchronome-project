@@ -1,0 +1,131 @@
+
+synchronome_program.c,96
+#define HRES 9,178
+#define VRES 10,195
+struct v4l2_state cameraState;12,213
+int main(14,245
+
+Services/synchronome_services.h,101
+#define _SYNCHRONOME_SRV_H18,366
+#define MY_SCHED_POLICY 20,394
+#define NUM_MSG_QUEUE_BUFS 21,429
+
+Services/synchronome_services.c,2488
+#define _SYNCHRONOME_SRV_C4,55
+#define CORE_0 6,83
+#define CORE_1 7,100
+#define CORE_2 8,117
+#define CORE_3 9,134
+#define TO_PROCESSING_MQ 11,152
+#define TO_SELECTION_MQ 12,197
+#define MILLI_TO_NANO 14,241
+#define UNIT_TIME_MS 15,271
+#define T_LOAD_SELECT 16,295
+struct thread_args18,320
+    struct v4l2_state *state;state20,341
+struct load_to_select_msg23,375
+    char *buf1;buf125,403
+    char *buf2;buf226,419
+    unsigned int bufLen;27,435
+struct load_to_select_msg30,464
+    char *buf1;buf132,492
+    char *buf2;buf233,508
+    unsigned int bufLen;34,524
+struct select_to_process_msg37,553
+    char *buf;buf39,584
+    unsigned int bufLen;40,599
+pthread_attr_t     attrLoad;43,628
+pthread_t          threadLoad;44,657
+struct sched_param paramsLoad;45,688
+pthread_attr_t     attrSelect;47,720
+pthread_t          threadSelect;48,751
+struct sched_param paramsSelect;49,784
+pthread_attr_t     attrProcessWrite;51,818
+pthread_t          threadProcessWrite;52,855
+struct sched_param paramsProcessWrite;53,894
+pthread_attr_t     attrStarter;55,934
+pthread_t          threadStarter;56,966
+struct sched_param paramsStarter;57,1000
+sem_t semLoad;59,1035
+sem_t semSelect;60,1050
+pthread_mutex_t mutexSynchronome;61,1067
+unsigned int sequencePeriods 63,1102
+unsigned int remainingSequencePeriods;64,1137
+double imageLoaderCumulativeTime;66,1177
+double imageLoaderMaxTime;67,1211
+double imageLoaderMinTime;68,1238
+double imageSelectorCumulativeTime;69,1265
+double imageSelectorMaxTime;70,1301
+double imageSelectorMinTime;71,1330
+double imageProcessorCumulativeTime;72,1359
+double imageProcessorMaxTime;73,1396
+double imageProcessorMinTime;74,1426
+double imageWriterCumulativeTime;75,1456
+double imageWriterMaxTime;76,1490
+double imageWriterMinTime;77,1517
+char unameBuf[unameBuf78,1544
+unsigned int unameBufLen;79,1564
+bool run_synchronome(127,3598
+static bool set_thread_attributes(220,6528
+static void *starter(starter294,8546
+void sequencer(496,14948
+static void *service_load(service_load532,15866
+static void *service_load(service_load679,19718
+static bool selectImage(842,24161
+static bool processImage(889,25449
+static bool writeImage 954,27693
+static bool add_ppm_header(986,28660
+static int convert_yuyv_image_to_rgb(1056,30903
+static void addCoolBorder(1108,32472
+static void dump_ppm(1180,34527
+static void yuv2rgb(1218,35806
+static bool init_message_queue(1265,37035
+static void print_scheduler(1326,38578
+
+Libraries/v4l2_library.c,390
+#define _V4L2_LIBRARY_C4,51
+static int xioctl(17,235
+static bool init_mmap(48,1277
+void init_v4l2_state(173,4494
+bool open_device(195,5100
+bool close_device(263,6813
+bool init_device(302,8168
+bool uninit_device(524,14672
+bool start_capturing(586,16440
+bool stop_capturing(637,17926
+bool queue_stream_bufs(690,19550
+bool read_frame_stream(762,21783
+int is_image_ready(834,24229
+
+Libraries/common_library.h,54
+#define _GNU_SOURCE2,20
+#define _COMMON_LIB_H12,193
+
+Libraries/v4l2_library.h,759
+#define _V4L2_LIBRARY_H26,504
+#define NUM_CAMERA_BUFFERS 28,529
+#define MAX_HEADER_SIZE 29,582
+enum io_method 35,725
+        IO_METHOD_READ,37,743
+        IO_METHOD_MMAP,38,767
+        IO_METHOD_USERPTR,39,791
+struct buffer 44,824
+        void   *start;start46,841
+        size_t  length;47,864
+struct v4l2_state 50,892
+    int fileDescriptor;51,912
+    char deviceName[deviceName52,936
+    enum io_method ioMethod;53,961
+    struct v4l2_format formatData;54,990
+    unsigned int numBuffers;55,1025
+    struct buffer *bufferList;bufferList56,1054
+    int curBufIndex;57,1085
+    char *outBuffer;outBuffer58,1106
+    unsigned int outBufferSize;59,1127
+    unsigned int outDataSize;60,1159
+    struct timespec outDataTimeStamp;61,1189
+
+Libraries/common_library.c,87
+#define _COMMON_LIB_C5,52
+void errno_print(7,75
+double timespec_to_double_us(25,702

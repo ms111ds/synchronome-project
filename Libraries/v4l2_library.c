@@ -79,7 +79,7 @@ static bool init_mmap( struct v4l2_state *state )
     }
 
     // If the device allocates too few buffers for the application, exit.
-    if ( req.count < 2 ) 
+    if ( req.count < NUM_CAMERA_BUFFERS )
     {
         fprintf(stderr,
                 "Insufficient buffer memory on %s\n",
@@ -831,31 +831,31 @@ bool read_frame_stream( int *bufIndex, struct v4l2_state *state )
  *              method is not applicable ( IO_METHOD_READ ). 0 otherwise.
  *
  *****************************************************************************/
-//int is_image_ready( int buf_index )
-//{
-//    int rv = 0;
-//    struct v4l2_buffer buf_info = { 0 };
-//
-//    if ( ( io == IO_METHOD_MMAP ) || ( io == IO_METHOD_USERPTR ) )
-//    {
-//    	buf_info.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-//    	buf_info.index = buf_index;
-//    	
-//    	if ( -1 != xioctl(fd, VIDIOC_QUERYBUF, &buf_info ) )
-//    	{
-//    	    if ( buf_info.flags & V4L2_BUF_FLAG_DONE )
-//    	    {
-//    	        rv = 1;
-//    	    }
-//    	}
-//    }
-//    else
-//    {
-//        rv = 1;
-//    }
-//
-//    return rv;
-//}
+int is_image_ready( int buf_index )
+{
+    int rv = 0;
+    struct v4l2_buffer buf_info = { 0 };
+
+    if ( ( io == IO_METHOD_MMAP ) || ( io == IO_METHOD_USERPTR ) )
+    {
+    	buf_info.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    	buf_info.index = buf_index;
+    	
+    	if ( -1 != xioctl(fd, VIDIOC_QUERYBUF, &buf_info ) )
+    	{
+    	    if ( buf_info.flags & V4L2_BUF_FLAG_DONE )
+    	    {
+    	        rv = 1;
+    	    }
+    	}
+    }
+    else
+    {
+        rv = 1;
+    }
+
+    return rv;
+}
 
 
 #endif // #ifndef _V4L2_LIBRARY_C
