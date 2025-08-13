@@ -1,4 +1,4 @@
-#include "test_services.h"
+#include "synchronome_services.h"
 
 #ifndef _SYNCHRONOME_SRV_C
 #define _SYNCHRONOME_SRV_C
@@ -11,9 +11,16 @@
 #define TO_PROCESSING_MQ "/to_processing_mq"
 #define TO_SELECTION_MQ "/to_selection_mq"
 
+#define SEC_TO_NANO 1000000000
 #define MILLI_TO_NANO 1000000
-#define UNIT_TIME_MS 20
-#define T_LOAD_SELECT 5
+#define MICRO_TO_NANO 1000
+
+#define UNIT_TIME_MS 33
+#define T_LOAD_SELECT 4
+//#define NUM_PERIODS 100
+#define NUM_PICS 1801
+#define DIFF_THRESHOLD 0.005
+#define STABLE_FRAMES_THRESHOLD 4
 
 struct thread_args
 {
@@ -24,20 +31,25 @@ struct load_to_select_msg
 {
     char *buf1;
     char *buf2;
-    unsigned int bufLen;
-};
-
-struct load_to_select_msg
-{
-    char *buf1;
-    char *buf2;
-    unsigned int bufLen;
+    unsigned int msgLen;
+    unsigned int heightInPixels;
+    unsigned int widthInPixels;
+    struct timespec imageCaptureTime;
 };
 
 struct select_to_process_msg
 {
     char *buf;
-    unsigned int bufLen;
+    unsigned int msgLen;
+    unsigned int heightInPixels;
+    unsigned int widthInPixels;
+    struct timespec imageCaptureTime;
+};
+
+union general_msg
+{
+    struct load_to_select_msg loadToSelectMsg;
+    struct select_to_process_msg selectToProcessMsg;
 };
 
 pthread_attr_t     attrLoad;
@@ -60,8 +72,13 @@ sem_t semLoad;
 sem_t semSelect;
 pthread_mutex_t mutexSynchronome;
 
-unsigned int sequencePeriods = 60;
-unsigned int remainingSequencePeriods;
+//unsigned int sequencePeriods = NUM_PERIODS;
+//unsigned int remainingSequencePeriods;
+unsigned int remainingPics;
+
+bool isLoadContinue = true;
+bool isSelectContinue = true;
+bool isProcessWriteContinue = true;
 
 double imageLoaderCumulativeTime;
 double imageLoaderMaxTime;
@@ -77,6 +94,15 @@ double imageWriterMaxTime;
 double imageWriterMinTime;
 char unameBuf[256];
 unsigned int unameBufLen;
+char *selectOutBuf = NULL;
+char *processBuf = NULL;
+//char **frameArray = NULL;
+//char frameArray2[3][HRES * VRES * 3]
+
+char *servicesLogString = "[Course #:4] [Final Project] [Run Count: %u] "
+                          "[%s Elapsed Time: %lf us]";
+char *recordImageLogString = "[Course #:4] [Final Project] [Frame Count: %u] "
+                             "[Image Capture Start Time: %lf seconds]";
 
 
 static bool set_thread_attributes( pthread_attr_t *attr,
@@ -86,11 +112,26 @@ static bool set_thread_attributes( pthread_attr_t *attr,
                                    int affinity );
 static void *starter( void *threadp );
 void sequencer( int id );
-static void *service_load_and_selec( void *threadp );
-static bool loadImage( struct v4l2_state *state );
-static bool selectImage ( struct v4l2_state *state );
-static bool processImage( struct v4l2_state *state );
-static bool writeImage ( struct v4l2_state *state, unsigned int tag );
+static void *service_load( void *threadp );
+static void *service_select( void *threadp );
+static void *service_process_and_write( void *threadp );
+static double calc_array_diff_8bit( char *bufNewer,
+                                    char *bufOlder,
+                                    unsigned int msgLen );
+static bool processImage( char *frameData,
+                          unsigned int frameLen,
+                          unsigned int frameWidth,
+                          char *outBuffer,
+                          unsigned int *outFrameSize );
+static void dump_ppm( const void *p,
+                      int size,
+                      char *header,
+                      int headerSize,
+                      unsigned int tag );
+//static bool loadImage( struct v4l2_state *state );
+//static bool selectImage ( struct v4l2_state *state );
+//static bool processImage( struct v4l2_state *state );
+//static bool writeImage ( struct v4l2_state *state, unsigned int tag );
 static bool add_ppm_header( char *buf,
                             unsigned int bufLen,
                             unsigned int seconds,
@@ -98,17 +139,20 @@ static bool add_ppm_header( char *buf,
                             unsigned int horizontalResolution,
                             unsigned int verticalResolution,
                             unsigned int *stampLen );
+#if !OUTPUT_YUYV_PPM
 static int convert_yuyv_image_to_rgb( char *yuyvBufIn,
                                        int yuyvBufLen,
                                        char *rgbBufOut );
-static void dump_ppm(const void *p, int size, unsigned int tag );
 static void yuv2rgb(int y,
                     int u,
                     int v,
                     unsigned char *r,
                     unsigned char *g,
                     unsigned char *b);
+#endif // #if !OUTPUT_YUYV_PPM
+#if USE_COOL_BORDER
 static void addCoolBorder( char *yuyvBufIn, int yuyvBufLen, int pixelsPerLine );
+#endif // #if USE_COOL_BORDER
 static bool init_message_queue( mqd_t *mqDescriptor, char *mqName );
 static void print_scheduler(void);
 
@@ -131,26 +175,54 @@ bool run_synchronome( struct v4l2_state *state )
     int rv;
     struct thread_args serviceArgs;
 
+
+    // Uname -a output for syslog and ppm header
     FILE* unameOutput = popen("uname -a", "r");
     if ( fgets( unameBuf, sizeof(unameBuf), unameOutput) == NULL )
     {
-        errno_print( "uname -a output\n" );
+        errno_print( "ERROR: uname -a output" );
         goto END;
     }
     pclose( unameOutput );
     unameBufLen = (unsigned int)strlen( unameBuf );
+
+    syslog( LOG_CRIT, "[Course #:4] [Final Project] %s", unameBuf );
     
 
     // Delete the message queues if they already exists
-    mq_unlink( TO_SELECTION_MQ );
-    mq_unlink( TO_PROCESSING_MQ );
+    if ( mq_unlink( TO_SELECTION_MQ ) != 0 )
+    {
+        errno_print( "ERROR: TO_SELECTION_MQ unlink 1" );
+    }
+    if ( mq_unlink( TO_PROCESSING_MQ ) != 0 )
+    {
+        errno_print( "ERROR: TO_PROCESSING_MQ unlink 1" );
+    }
+
+    // Dynamically allocate memory to create working buffers for frame
+    // frame processing.
+    processBuf = selectOutBuf = malloc( state->outBufferSize );
+    if ( processBuf == NULL )
+    {
+        errno_print( "ERROR: run_synchronome malloc" );
+        goto END;
+    }
+
+    selectOutBuf = malloc( state->outBufferSize );
+    if ( selectOutBuf == NULL )
+    {
+        errno_print( "ERROR: run_synchronome malloc" );
+        goto END;
+    }
+
+    
 
     // Set thread attributes of the image loading service, the image processing
     // service and the scheduler.
     threadMaxPriority = sched_get_priority_max( MY_SCHED_POLICY );
     if ( threadMaxPriority == -1 )
     {
-        errno_print("error getting minimum priority");
+        errno_print("ERROR: error getting minimum priority");
         goto END;
     }
 
@@ -165,6 +237,8 @@ bool run_synchronome( struct v4l2_state *state )
         fprintf(stderr, "set_thread_attributes: starter service\n");
         goto END;
     }
+
+    printf( "run_synchronome\n" );
 
     serviceArgs.state = state;
     // Start the launger and wait for it to join back.
@@ -186,11 +260,34 @@ bool run_synchronome( struct v4l2_state *state )
         goto END;
     }
 
-    // clean up message queue when finished
-    mq_unlink( TO_SELECTION_MQ );
-    mq_unlink( TO_PROCESSING_MQ );
 
 END:
+
+
+    if ( selectOutBuf != NULL )
+    {
+        free( selectOutBuf );
+        selectOutBuf = NULL;
+    }
+    
+    if ( processBuf != NULL )
+    {
+        free( processBuf );
+        processBuf = NULL;
+    }
+    processBuf = NULL;
+    
+    // clean up message queue when finished
+    if ( mq_unlink( TO_SELECTION_MQ ) != 0 )
+    {
+        errno_print( "ERROR: TO_SELECTION_MQ unlink 2" );
+    }
+    if ( mq_unlink( TO_PROCESSING_MQ ) != 0 )
+    {
+        errno_print( "ERROR: TO_PROCESSING_MQ unlink 2" );
+    }
+
+    printf( "end run synchronome\n" );
 
     return isPass;
 }
@@ -206,7 +303,6 @@ END:
  * Arguments:   attr (OUT):    pthread attribute struct that will be set up.
  *
  *              params (OUT):  scheduling parameters struct that will be set up.
- *                                      service.
  *
  *              schedulingPolicy (IN): scheduling policy to set up in attr.
  *
@@ -232,21 +328,21 @@ static bool set_thread_attributes( pthread_attr_t *attr,
     rc = pthread_attr_init( attr );
     if ( rc != 0 )
     {
-        errno_print( "pthread_attr_init" );
+        errno_print( "ERROR: pthread_attr_init" );
         goto END;
     }
 
     rc = pthread_attr_setinheritsched( attr, PTHREAD_EXPLICIT_SCHED);
     if ( rc != 0 )
     {
-        errno_print( "pthread_attr_setinheritsched" );
+        errno_print( "ERROR: pthread_attr_setinheritsched" );
         goto END;
     }
 
     rc = pthread_attr_setschedpolicy( attr, schedulingPolicy );
     if ( rc != 0 )
     {
-        errno_print( "pthread_attr_setschedpolicy" );
+        errno_print( "ERROR: pthread_attr_setschedpolicy" );
         goto END;
     }
 
@@ -255,7 +351,7 @@ static bool set_thread_attributes( pthread_attr_t *attr,
     rc = pthread_attr_setschedparam( attr, params );
     if ( rc != 0 )
     {
-        errno_print( "pthread_attr_setschedparam" );
+        errno_print( "ERROR: pthread_attr_setschedparam" );
         goto END;
     }
 
@@ -266,7 +362,7 @@ static bool set_thread_attributes( pthread_attr_t *attr,
     rc = pthread_attr_setaffinity_np( attr, sizeof(thread_cpu), &thread_cpu );
     if ( rc != 0 )
     {
-        errno_print( "pthread_attr_setaffinity_np" );
+        errno_print( "ERROR: pthread_attr_setaffinity_np" );
         goto END;
     }
 
@@ -296,12 +392,17 @@ static void *starter( void *threadp )
     int rv;
     bool isPass;
     int threadMaxPriority;
+    int threadMinPriority;
     timer_t sequencerTimer;
     struct itimerspec intervalTime = { {1,0}, { 1,0 } };
     struct itimerspec oldIntervalTime = { {1,0}, { 1,0 } };
     int flags = 0;
     bool isOkLoadSem = false;
     bool isOkSelectSem = false;
+    bool isStartedLoadService = false;
+    bool isStartedSelectService = false;
+    bool isStartedProcessWriteService = false;
+    bool isTimerCreated = false;
     bool isMutAttrCreated = false;
     bool isMutCreated = false;
     pthread_mutexattr_t mutex_attributes;
@@ -312,14 +413,14 @@ static void *starter( void *threadp )
     // Initialize semaphores
     if ( sem_init( &semLoad, 0, 0 ) != 0 )
     {
-        errno_print( "semaphore init" );
+        errno_print( "ERROR: semaphore init" );
         goto END;
     }
     isOkLoadSem = true;
 
     if ( sem_init( &semSelect, 0, 0 ) != 0 )
     {
-        errno_print( "semaphore init" );
+        errno_print( "ERROR: semaphore init" );
         goto END;
     }
     isOkSelectSem = true;
@@ -329,39 +430,47 @@ static void *starter( void *threadp )
     // Initialize mutex with priority inheritance
     if ( pthread_mutexattr_init( &mutex_attributes ) != 0 )
     {
-        errno_print( "mutex attributes init" );
+        errno_print( "ERROR: mutex attributes init" );
         goto END;
     }
-
+    
     isMutAttrCreated = true;
-
+    
     if ( pthread_mutexattr_setprotocol( &mutex_attributes,
                                         PTHREAD_PRIO_INHERIT ) != 0 )
     {
-        errno_print( "mutex attributes set protocol" );
+        errno_print( "ERROR: mutex attributes set protocol" );
         goto END;
     }
     if ( pthread_mutex_init( &mutexSynchronome, &mutex_attributes ) != 0 )
     {
-        errno_print( "mutex init" );
+        errno_print( "ERROR: mutex init" );
         goto END;
     }
 
-    
     isMutCreated = true;
 
+
+    // get max and min thread priorities
     threadMaxPriority = sched_get_priority_max( MY_SCHED_POLICY );
     if ( threadMaxPriority == -1 )
+    {
+        errno_print("error getting maximum priority");
+        goto END;
+    }
+    printf( "Max scheduling priority is %i\n", threadMaxPriority );
+    
+    threadMinPriority = sched_get_priority_min( MY_SCHED_POLICY );
+    if ( threadMinPriority == -1 )
     {
         errno_print("error getting minimum priority");
         goto END;
     }
+    printf( "Min scheduling priority is %i\n", threadMinPriority );
     
     
     // Set thread attributes for the servicea that do the image loading and
     // image selection (HIGH PRIORITY).
-
-
     isPass = set_thread_attributes( &attrLoad,
                                     &paramsLoad,
                                     MY_SCHED_POLICY,
@@ -385,12 +494,12 @@ static void *starter( void *threadp )
     }
 
     // Set thread attributes for the service that does the image processing and
-    // image writing (SLACK STEALER).
+    // image writing (SLACK STEALER). It will run on it's own processor.
     isPass = set_thread_attributes( &attrProcessWrite,
                                     &paramsProcessWrite,
                                     MY_SCHED_POLICY,
-                                    threadMaxPriority - 3,
-                                    CORE_3 );
+                                    threadMinPriority, //threadMaxPriority - 3,
+                                    CORE_2 );
     if ( isPass != true )
     {
         fprintf(stderr, "set_thread_attributes: process + write service\n");
@@ -403,41 +512,58 @@ static void *starter( void *threadp )
                          &attrLoad,    // use specific attributes
                          service_load, // thread function entry point
                          threadp );    // parameters to pass in
-    if ( rv < 0 )
+    if ( rv != 0 )
     {
-        errno_print( "error creating load service\n" );
+        errno_print( "ERROR: error creating load service\n" );
         goto END;
     }
-
+    isStartedLoadService = true; 
+    
     // Create the service thread that handles image selection.
     rv =  pthread_create(&threadSelect,  // pointer to thread descriptor
                          &attrSelect,    // use specific attributes
                          service_select, // thread function entry point
                          threadp );    // parameters to pass in
-    if ( rv < 0 )
+    if ( rv != 0 )
     {
-        errno_print( "error creating select service\n" );
+        errno_print( "ERROR: error creating select service\n" );
         goto END;
     }
+    isStartedSelectService = true;
 
-    // Create the service thread that handles image processing and writing.
+    // Create the service thread that handles image processing and writing to
+    // a file.
     rv =  pthread_create(&threadProcessWrite,  // pointer to thread descriptor
                          &attrProcessWrite,    // use specific attributes
                          service_process_and_write, // thread function entry point
                          threadp );    // parameters to pass in
-    if ( rv < 0 )
+    if ( rv != 0 )
     {
-        errno_print( "error creating process + write service\n" );
+        errno_print( "ERROR: error creating process+write service\n" );
         goto END;
     }
+    isStartedProcessWriteService = true;
+
+    printf( "All service threads created\n" );
 
     // Set up a timer which will trigger the execution of the sequencer
     // whenever it counts to zero.
     /* set up to signal SIGALRM if timer expires */
-    remainingSequencePeriods = sequencePeriods;
-    timer_create( CLOCK_REALTIME, NULL, &sequencerTimer );
+    
     signal(SIGALRM, (void(*)()) sequencer);
 
+    if ( timer_create( CLOCK_REALTIME, NULL, &sequencerTimer ) != 0 )
+    {
+        errno_print( "ERROR: timer_create\n" );
+        pthread_mutex_lock( &mutexSynchronome );
+        remainingPics = 0;
+        pthread_mutex_unlock( &mutexSynchronome );
+        goto END; 
+    }
+    isTimerCreated = true;
+    pthread_mutex_lock( &mutexSynchronome );
+    remainingPics = NUM_PICS;
+    pthread_mutex_unlock( &mutexSynchronome );
     intervalTime.it_interval.tv_sec = 0;
     intervalTime.it_interval.tv_nsec = UNIT_TIME_MS * MILLI_TO_NANO; // refill timer with this
     intervalTime.it_value.tv_sec = 0;
@@ -446,28 +572,47 @@ static void *starter( void *threadp )
     timer_settime( sequencerTimer, flags, &intervalTime, &oldIntervalTime );
 
 
-    // Wait for the load and select services thread to complete
-    rv = pthread_join( threadLoad, NULL );
-    if ( rv < 0)
+END:
+
+    // Wait for the load service thread to complete
+    if ( isStartedLoadService == true )
     {
-        errno_print( "error joining with load + select service\n");
+    	rv = pthread_join( threadLoad, NULL );
+    	if ( rv < 0)
+    	{
+    	    errno_print( "ERROR: error joining with load service\n");
+    	}
     }
     
-    // Wait for the process and write services thread to complete
-    rv = pthread_join( threadProcessWrite, NULL );
-    if ( rv < 0)
+    // Wait for the select service thread to complete
+    if ( isStartedSelectService == true )
     {
-        errno_print( "error joining with process + write service\n");
+    	rv = pthread_join( threadSelect, NULL );
+    	if ( rv < 0)
+    	{
+    	    errno_print( "ERROR: error joining with select service\n");
+    	}
     }
 
-    // Disable the timer
-    intervalTime.it_interval.tv_sec = 0;
-    intervalTime.it_interval.tv_nsec = 0;
-    intervalTime.it_value.tv_sec = 0;
-    intervalTime.it_value.tv_nsec = 0;
-    timer_settime( sequencerTimer, flags, &intervalTime, &oldIntervalTime );
+    // Wait for the process and write services thread to complete
+    if (  isStartedProcessWriteService == true )
+    {
+    	rv = pthread_join( threadProcessWrite, NULL );
+    	if ( rv < 0)
+    	{
+    	    errno_print( "ERROR: error joining with process + write service\n");
+    	}
+    }
 
-END:
+    if ( isTimerCreated == true )
+    {
+        // Disable the timer
+        intervalTime.it_interval.tv_sec = 0;
+    	intervalTime.it_interval.tv_nsec = 0;
+    	intervalTime.it_value.tv_sec = 0;
+    	intervalTime.it_value.tv_nsec = 0;
+    	timer_settime( sequencerTimer, flags, &intervalTime, &oldIntervalTime );
+    }
 
     if ( isOkLoadSem == true ) sem_destroy( &semLoad );
     if ( isOkSelectSem == true ) sem_destroy( &semSelect );
@@ -476,6 +621,8 @@ END:
         pthread_mutexattr_destroy( &mutex_attributes );
     }
     if ( isMutCreated == true ) pthread_mutex_destroy( &mutexSynchronome );
+
+    printf( "end starter service\n" );
     
     return (void *)NULL;
 }
@@ -496,22 +643,34 @@ END:
 void sequencer(int id)
 {
     static unsigned int curPeriod = 0;
+    unsigned int rp;
+    
     //printf( "in the SE-SE-SEQUENCER!!\n" );
 
-    pthread_mutex_lock( &mutexsynchronome );
-    if ( remainingSequencePeriods > 0 )
-    {
-        remainingSequencePeriods--;
-    }
-    
+    pthread_mutex_lock( &mutexSynchronome );
+    rp = remainingPics;
     pthread_mutex_unlock( &mutexSynchronome );
-    if ( ( curPeriod % T_LOAD_SELECT ) == 0 )
+    
+    
+    if ( rp > 0 )
     {
+        curPeriod++;
+        //printf( "curPeriod: %u, mod %u\n", curPeriod,  curPeriod % T_LOAD_SELECT );
+    	if ( ( curPeriod % T_LOAD_SELECT ) == 0 )
+    	{
+    	    sem_post( &semLoad );
+    	    sem_post( &semSelect );
+    	}
+    	
+    }
+    else
+    {
+        isLoadContinue = false;
+        isSelectContinue = false;
+        isProcessWriteContinue = false;
         sem_post( &semLoad );
         sem_post( &semSelect );
     }
-
-    curPeriod ++;
 }
 
 
@@ -531,132 +690,176 @@ void sequencer(int id)
  *****************************************************************************/
 static void *service_load( void *threadp )
 {
-    bool isServiceContinue = true;
     bool isMqCreated = false;
-    bool isFail = false;
     struct timespec startTime;
     struct timespec endTime;
     double deltaTimeUs;
-    int curRun = 0;
+    int count = 0;
     struct v4l2_state *state = ( (struct thread_args *)threadp )->state;
     mqd_t mq_to_selection;
     bool rv;
     int curBuf;
     int prevBuf;
     int prevPrevBuf;
-    struct load_to_select_msg msgOut;
+    union general_msg msgOut;
     int mmapIdx1;
     int mmapIdx2;
+    struct timespec startCaptureTimes[NUM_CAMERA_BUFFERS];
     
+    clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
+    count++;
 
     rv = init_message_queue( &mq_to_selection, TO_SELECTION_MQ );
     if ( rv == false )
     {
-        isFail = true;
         goto END;
     }
     isMqCreated = true;
 
-
+    
     // Load the first image. Will need 2 to start selecting valid images by
     // comparing them.
-    if ( queue_stream_bufs( 1, state ) == false )
+    curBuf = 0;
+    if ( queue_stream_bufs( curBuf, state ) == false )
     {
-       isFail = true;
        goto END;
     }
-    
+    clock_gettime( CLOCK_MONOTONIC_RAW, &(startCaptureTimes[curBuf]) );
+    clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
+    deltaTimeUs = timespec_to_double_us( &endTime ) -
+                  timespec_to_double_us( &startTime );
+
+    SERVICE_LOG( servicesLogString, count, "LOAD", deltaTimeUs );
+
+
+
     sem_wait( &semLoad );
+
+    // early exit
+    if ( isLoadContinue == false )
+    {
+        goto END;
+    }
+
+    clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
+    count++;
 
     // Read the buffer we started downloading last period.
     if ( read_frame_stream( &mmapIdx1, state ) == false )
     {
-        isFail = true;
         goto END;
     }
 
-    // Load the second image. Will need 2 to start selecting valid images by
-    // comparing them.
-    if ( queue_stream_bufs( 2, state ) == false )
+    // Load the second image. Once this loads the select service has enough
+    // frames to start looking for stable images.
+    if ( queue_stream_bufs( 1, state ) == false )
     {
-       isFail = true;
        goto END;
     }
 
-    curBuf = 2;
-    prevBuf = 1;
-    prevPrevBuf = 0;
+    // the three indicies below will help us keep track of image buffers
+    // so that images may be continually downloaded by the camera and compared.
+    curBuf = 1; // buffer the camera will start to download an image to
+    prevBuf = 0; // buffer containing the latest image downloaded
+                 // by the camera
+    prevPrevBuf = NUM_CAMERA_BUFFERS - 1; // previous image downloaded by the
+                                          // camera
+    clock_gettime( CLOCK_MONOTONIC_RAW, &(startCaptureTimes[curBuf]) );
 
-    while ( isServiceContinue )
+    while ( true )
     {
+        clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
+        deltaTimeUs = timespec_to_double_us( &endTime ) -
+                      timespec_to_double_us( &startTime );
+
+        SERVICE_LOG( servicesLogString, count, "LOAD", deltaTimeUs );
+        
         if ( sem_wait( &semLoad ) != 0 )
         {
-            errno_print( "sem_wait load\n");
-            isFail = true;
-            goto END;
+            errno_print( "ERROR: sem_wait load\n");
+            break;
         }
-        curRun++;
+
+        // For early exit or exit when we have gathered enough images
+        if ( isLoadContinue == false )
+        {
+            break;
+        }
+
+        clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
+        count++;
         
         curBuf = ( curBuf + 1 ) % NUM_CAMERA_BUFFERS;
         prevBuf = ( prevBuf + 1 ) % NUM_CAMERA_BUFFERS;
         prevPrevBuf = ( prevPrevBuf + 1 ) % NUM_CAMERA_BUFFERS;
 
+        // let the camera use a buffer to download a new image to.
         if ( queue_stream_bufs( curBuf, state ) == false )
         {
-           isFail = true;
-           goto END;
+           break;
         }
+        clock_gettime( CLOCK_MONOTONIC_RAW, &(startCaptureTimes[curBuf]) );
 
         // Read the buffer we started downloading last period.
         mmapIdx2 = mmapIdx1;
         if ( read_frame_stream( &mmapIdx1, state ) == false )
         {
-            isFail = true;
-            goto END;
+            break;
         }
 
-        // sanity check. Ensure the last two frames read have the same length.
+        // sanity check. Ensure the last two downloaded frames read have the
+        // same length.
         if ( state->bufferList[mmapIdx1].length !=
              state->bufferList[mmapIdx2].length )
         {
-            isFail = true;
-            goto END;
+            printf( "service_load sanity check 1 failed: mmapIdx1 buf len= %u, "
+                    "mmapIdx2 buf len= %u\n",
+                    (unsigned int)state->bufferList[mmapIdx1].length,
+                    (unsigned int)state->bufferList[mmapIdx2].length );
+            break;
+        }
+        // sanity check. Ensure the actual index of last downloaded frame, i.e.
+        // mmapIdx1, corresponds to our record keeping variable for the last
+        // downloaded fram, i.e. prevBuf
+        if ( prevBuf != mmapIdx1 )
+        {
+            printf( "service_load sanity check 2 failed: "
+                    "prevBuf=%i mmapIdx1=%i\n", prevBuf, mmapIdx1 );
+            break;
         }
 
+
         // Send message out to be picked up by the selection service.
-        msgOut.buf1 = state->bufferList[mmapIdx1].start;
-        msgOut.buf2 = state->bufferList[mmapIdx2].start;
-        msgOut.bufLen = state->bufferList[mmapIdx1].length;
+        msgOut.loadToSelectMsg.buf1 = state->bufferList[mmapIdx1].start;
+        msgOut.loadToSelectMsg.buf2 = state->bufferList[mmapIdx2].start;
+        msgOut.loadToSelectMsg.msgLen = state->bufferList[mmapIdx1].length;
+        
+        msgOut.loadToSelectMsg.heightInPixels =
+            (unsigned int)state->formatData.fmt.pix.height;
+        
+        msgOut.loadToSelectMsg.widthInPixels =
+            (unsigned int)state->formatData.fmt.pix.width;
+
+        msgOut.loadToSelectMsg.imageCaptureTime = startCaptureTimes[prevBuf];
+        
         if ( mq_send( mq_to_selection,
                       (char *)&msgOut,
                       sizeof(msgOut), 30) != 0 )
         {
-            errno_print( "mq_send load->select\n");
-            isFail = true;
-            goto END;
+            errno_print( "ERROR: mq_send load->select\n");
+            break;
         }
 
-        pthread_mutex_lock( &mutexSynchrome );
-    	if ( remainingSequencePeriods == 0 )
-    	{
-    	    isServiceContinue = false;
-    	}
-    	pthread_mutex_unlock( &mutexSynchronome );
-
     }
-        
+
 END:
+        
     if ( isMqCreated == true )
     {
         mq_close( mq_to_selection );
     }
 
-    if ( isFail == true )
-    {
-        pthread_mutex_lock( &mutexSynchrome );
-        remainingSequencePeriods = 0; // end all services
-        pthread_mutex_unlock( &mutexSynchrome );
-    }
+    printf( "end load service\n" );
 
     return (void *)NULL;
 }
@@ -678,26 +881,35 @@ END:
  *****************************************************************************/
 static void *service_select( void *threadp )
 {
-    bool isServiceContinue = true;
     bool isMqFromLoadCreated = false;
-    bool isMqToProcessing = false;
-    bool isFail = false;
-    //struct v4l2_state *state = ( (struct thread_args *)threadp )->state;
+    bool isMqToProcessingCreated = false;
     mqd_t mq_from_load;
     mqd_t mq_to_processing;
     bool rv;
-    struct load_to_select_msg msgIn;
-    struct select_to_process_msg msgOut;
+    union general_msg msgIn;
+    union general_msg msgOut;
     char *bufNewer;
     char *bufOlder;
-    unsigned int bufLen;
+    unsigned int msgLen;
     int count = 0;
-    
+    //struct mq_attr mqAttr;
+    double percentDiff;
+    bool isStable = false;
+    unsigned int numStableFrames = 0;
+    struct timespec startTime;
+    struct timespec endTime;
+    double deltaTimeUs;
+    //unsigned int outCount = 0;
 
+    clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
+    count++;
+
+    // initialize two message queues. One to recieve images to compare from the
+    // image loading service, the other to send new stable images to the
+    // process + write service.
     rv = init_message_queue( &mq_from_load, TO_SELECTION_MQ );
     if ( rv == false )
     {
-        isFail = true;
         goto END;
     }
     isMqFromLoadCreated = true;
@@ -705,20 +917,36 @@ static void *service_select( void *threadp )
     rv = init_message_queue( &mq_to_processing, TO_PROCESSING_MQ );
     if ( rv == false )
     {
-        isFail = true;
         goto END;
     }
     isMqToProcessingCreated = true;
 
+    //mq_getattr( mq_to_processing, &mqAttr );
+    //printf( "in select. MQ cur msgs = %li\n", mqAttr.mq_curmsgs );
 
-    while ( isServiceContinue )
+
+    while ( true )
     {
+        clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
+        deltaTimeUs = timespec_to_double_us( &endTime ) -
+                      timespec_to_double_us( &startTime );
+
+        SERVICE_LOG( servicesLogString, count, "SELECT", deltaTimeUs );
+        
         if ( sem_wait( &semSelect ) != 0 )
         {
-            errno_print( "sem_wait select\n");
-            isFail = true;
+            errno_print( "ERROR: sem_wait select\n");
             goto END;
         }
+
+        // for early exit or when all requested images have been saved.
+        if ( isSelectContinue == false )
+        {
+            break;
+        }
+
+        clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
+        count++;
 
         if ( mq_receive( mq_from_load,
                          (char *)&msgIn,
@@ -727,46 +955,85 @@ static void *service_select( void *threadp )
         {
             if ( errno != EAGAIN )
             {    
-            	errno_print( "mq_recieve select\n");
-            	isFail = true;
-            	goto END;
+            	errno_print( "ERROR: mq_recieve select\n");
+            	break;
             }
-        }
-        else
-        {
-            printf( "in selection task: got msg from load\n" );
-        }
-
-        bufNewer = msgIn.buf1;
-        bufOlder = msgIn.buf2;
-        bufLen = msgIn.bufLen;
-
-        //selectImage( bufNewer, bufOlder, bufLen );
-
-
-        if ( count % 4 == 0 )
-        {
-            if ( mq_send( mq_to_selection,
-                          (char *)&msgOut,
-                          sizeof(msgOut), 30) != 0 )
+            else
             {
-                errno_print( "mq_send select->process\n");
-                isFail = true;
-                goto END;
+                //printf( "select:Continue\n" );
+                continue;
             }
         }
-        count++;
 
+        bufNewer = msgIn.loadToSelectMsg.buf1;
+        bufOlder = msgIn.loadToSelectMsg.buf2;
+        msgLen   = msgIn.loadToSelectMsg.msgLen;
 
-        pthread_mutex_lock( &mutexSynchrome );
-    	if ( remainingSequencePeriods == 0 )
-    	{
-    	    isServiceContinue = false;
-    	}
-    	pthread_mutex_unlock( &mutexSynchronome );
-    }
+        // Compare the two images.
+        percentDiff = calc_array_diff_8bit( bufNewer, bufOlder, msgLen );
+        //printf( "percentDiff(%u): %lf\n", count, percentDiff );
+
+        if ( percentDiff > DIFF_THRESHOLD )
+        {
+            // case where a large difference in frames is encountered.
+            // Note the instability by setting isStable and numStableFrames.
+            isStable = false;
+            numStableFrames = 1;
+            continue;
+        }
+
+        numStableFrames++;
+
+        if ( isStable == true )
+        {
+            // case where have seen a sequence of virtually unchanging fames...
+            // Do nothing with them.
+            continue;
+        }
+
+        // case where we have recently encountered a large difference
+        // in frames (unstable) and we are trying to see if the frames
+        // have settled to a new stable one.
+        if ( numStableFrames < STABLE_FRAMES_THRESHOLD )
+        {
+            continue;
+        }
+
+        //outCount++;
+        //printf( "####(%u count) %%diff %lf\n", outCount,percentDiff );
         
+        // Here the frames have settled to a new one. We can remove the
+        // instability flag and send the frame for processing.
+        isStable = true;
+        
+        memcpy( selectOutBuf, bufNewer, msgLen );
+        msgOut.selectToProcessMsg.buf = selectOutBuf;
+        msgOut.selectToProcessMsg.msgLen = msgLen;
+        
+        msgOut.selectToProcessMsg.heightInPixels =
+            msgIn.loadToSelectMsg.heightInPixels;
+        
+        msgOut.selectToProcessMsg.widthInPixels =
+            msgIn.loadToSelectMsg.widthInPixels;
+
+        msgOut.selectToProcessMsg.imageCaptureTime =
+            msgIn.loadToSelectMsg.imageCaptureTime;
+        
+        if ( mq_send( mq_to_processing,
+                      (char *)&msgOut,
+                      sizeof(msgOut),
+                      30) != 0 )
+        {
+            errno_print( "ERROR: mq_send select->process\n");
+            break;
+        }
+        //printf( "#######", percentDiff );
+
+    }
+
 END:
+
+
     if ( isMqFromLoadCreated == true )
     {
         mq_close( mq_from_load );
@@ -777,12 +1044,7 @@ END:
         mq_close( mq_to_processing );
     }
 
-    if ( isFail == true )
-    {
-        pthread_mutex_lock( &mutexSynchrome );
-        remainingSequencePeriods = 0; // end all services
-        pthread_mutex_unlock( &mutexSynchrome );
-    }
+    printf( "end select service\n" );
 
     return (void *)NULL;
 }
@@ -803,169 +1065,221 @@ END:
  *****************************************************************************/
 static void *service_process_and_write( void *threadp )
 {
-    bool isServiceContinue = true;
-    bool isMCreated = false;
-    bool isFail = false;
+    bool isMqCreated = false;
     //struct v4l2_state *state = ( (struct thread_args *)threadp )->state;
-    mqd_t mq_from_load;
-    mqd_t mq_to_processing;
+    mqd_t mq_from_selection;
     bool rv;
-    struct select_to_process_msg msgIn;
-    char *buf;
-    unsigned int bufLen;
-    
+    union general_msg msgIn;
+    char *frameBuf;
+    unsigned int frameLen;
+    unsigned int frameHeight;
+    unsigned int frameWidth;
+    unsigned int processedFrameLen;
+    char headerBuf[512];
+    //struct timespec curTime;
+    struct timespec imageCaptureTime;
+    unsigned int seconds;
+    unsigned int microSeconds;
+    unsigned int stampLen;
+    struct timespec startTime;
+    struct timespec endTime;
+    double deltaTimeUs;
+    double imageCaptureTimeSec;
+    unsigned int count = 0;
+
+    //printf( "START PROCESS + WRITE\n" );
 
     rv = init_message_queue( &mq_from_selection, TO_PROCESSING_MQ );
     if ( rv == false )
     {
-        isFail = true;
         goto END;
     }
     isMqCreated = true;
 
+    //mq_getattr( mq_from_selection, &mqAttr );
+    //printf( "in process+write. MQ cur msgs = %li\n", mqAttr.mq_curmsgs );
 
 
-    while ( isServiceContinue )
+
+    while ( true )
     {
-        if ( mq_receive( mq_from_load,
+        if ( isProcessWriteContinue == false )
+        {
+            break;
+        }
+
+
+        clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
+
+        if ( mq_receive( mq_from_selection,
                          (char *)&msgIn,
                          sizeof(msgIn),
-                         NULL ) == -1 )
+                         NULL )  == -1 )
         {
             if ( errno != EAGAIN )
             {    
-            	errno_print( "mq_recieve process+write\n");
-            	isFail = true;
-            	goto END;
+            	errno_print( "ERROR: mq_recieve process+write\n");
+            	break;
             }
+            else
+            {
+                // When no frame is received from the selection service. Keep
+                // looping until one comes in.
+                continue;
+            }
+        }
+
+
+        count++;
+
+        // Get details of new frame sent over by the selection service
+        frameBuf = msgIn.selectToProcessMsg.buf;
+        frameLen = msgIn.selectToProcessMsg.msgLen;
+        frameHeight = msgIn.selectToProcessMsg.heightInPixels;
+        frameWidth = msgIn.selectToProcessMsg.widthInPixels;
+        imageCaptureTime = msgIn.selectToProcessMsg.imageCaptureTime;
+
+
+        // process the frame
+        rv = processImage( frameBuf,
+                           frameLen,
+                           frameWidth,
+                           processBuf,
+                           &processedFrameLen );
+        if ( rv != true )
+        {
+            errno_print( "ERROR: processImage process+write\n");
+            break;
+        }
+
+        // The frame shall be stored in flash as a .ppm file. Create the ppm
+        // header here.
+        seconds = imageCaptureTime.tv_sec;
+        if ( (unsigned int)imageCaptureTime.tv_nsec >= SEC_TO_NANO )
+        {
+            seconds++;
+            microSeconds = ( (unsigned int)imageCaptureTime.tv_nsec -
+                             SEC_TO_NANO ) / MICRO_TO_NANO;
         }
         else
         {
-            printf( "process + write task recieved msg\n" );
+            microSeconds = (unsigned int)imageCaptureTime.tv_nsec /
+                           MICRO_TO_NANO;
+        }
+        
+
+
+        rv = add_ppm_header( headerBuf,
+                             sizeof(headerBuf),
+                             seconds,
+                             microSeconds,
+                             frameWidth,
+                             frameHeight,
+                             &stampLen );
+        if ( rv != true )
+        {
+            errno_print( "ERROR: add_ppm_header process+write\n");
+            break;
         }
 
-        buf = msgIn.buf;
-        bufLen = msgIn.bufLen;
+        // Write the frame to flash as a .ppm file.
+        dump_ppm( processBuf,
+                  processedFrameLen,
+                  headerBuf,
+                  stampLen,
+                  count );
 
 
+        pthread_mutex_lock( &mutexSynchronome );
+        remainingPics--;
+        pthread_mutex_unlock( &mutexSynchronome );
+        
+        clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
+        deltaTimeUs = timespec_to_double_us( &endTime ) -
+                      timespec_to_double_us( &startTime );
 
+        SERVICE_LOG( servicesLogString, count, "PROCESS", deltaTimeUs );
 
-        pthread_mutex_lock( &mutexSynchrome );
-    	if ( remainingSequencePeriods == 0 )
-    	{
-    	    isServiceContinue = false;
-    	}
-    	pthread_mutex_unlock( &mutexSynchronome );
+        imageCaptureTimeSec = timespec_to_double_sec( &imageCaptureTime );
+        IMG_CAPTURE_LOG( recordImageLogString, count, imageCaptureTimeSec );
     }
         
 END:
+
     if ( isMqCreated == true )
     {
         mq_close( mq_from_selection );
     }
 
-    if ( isFail == true )
-    {
-        pthread_mutex_lock( &mutexSynchrome );
-        remainingSequencePeriods = 0; // end all services
-        pthread_mutex_unlock( &mutexSynchrome );
-    }
+    printf( "end process + write service\n" );
+
 
     return (void *)NULL;
 }
 
 
-///******************************************************************************
-// *
-// * loadImage
-// *
-// *
-// * Description: Test to see how long it takes for the camera to produce an
-// *              image. First QUEUES a buffer so the camera knows a buffer is
-// *              ready to write in. Then it DEQUEUES the buffer to have the
-// *              application wait for the image to be loaded by the camera.
-// *              This test assumes mmap (memory mapped) buffer communication
-// *              between the application and the camera.
-// *
-// * Arguments:   state (IN/OUT): v4l2 state with the information of an open
-// *              video device.
-// *
-// * Return:      true if successful, false otherwise.
-// *
-// *****************************************************************************/
-//static bool loadImage( struct v4l2_state *state )
-//{
-//    bool isPass = true;
-//    int readyBufIndex;
-//
-//
-//    // Tell the camera that a buffer ready to write in
-//    isPass = queue_stream_bufs( state->curBufIndex,
-//                                state );
-//
-//    // Wait for the camera to write into the buffer 
-//    isPass = read_frame_stream( &readyBufIndex, state );
-//
-//    if ( state->curBufIndex != (unsigned)readyBufIndex )
-//    {
-//        printf( "load image error: current buffer = %u, dequeued buffer %i",
-//                state->curBufIndex,
-//                readyBufIndex );
-//    }
-//
-//    // go to the next buffer. Since we only use 2 buffers, the next will be
-//    // either buffer 0 or buffer 1.
-//    state->curBufIndex = ( state->curBufIndex + 1 ) & 0x1;
-//
-//    return isPass;
-//}
 
 
 /******************************************************************************
  *
- * selectImage
+ * calc_array_diff_8bit
  *
  *
- * Description: A simple test to see if the last two images created by the
- *              camera are the same.
+ * Description: Frame comparison algorithm. Outputs a number to represent a
+ *              sort of "percent difference" between two buffers. Calculated as
+ *              a sum of all the "differences" between the bytes of the two
+ *              buffers.
  *
- * Arguments:   state (IN/OUT): v4l2 state with the information of an open
- *              video device.
+ * Arguments:   bufNewer (IN): First of two buffers to be compared.
  *
- * Return:      true if successful, false otherwise.
+ *              bufOlder (IN): Second of two buffers to be compared.
+ *
+ *              msgLen (IN): Number of bytes to compare.
+ *
+ * Return:      The "percent difference"
  *
  *****************************************************************************/
-static bool selectImage( struct v4l2_state *state )
+static double calc_array_diff_8bit( char *bufNewer,
+                                    char *bufOlder,
+                                    unsigned int msgLen )
 {
-    bool isPass = true;
-    int diff;
-    int passLimit = 100;
-
-    // Ensure lengths of the images are the same
-    if ( state->bufferList[0].length != state->bufferList[1].length )
-    {
-        printf( "image length discrepancy buf0 = %lu, buf1 = %lu\n",
-                state->bufferList[0].length,
-                state->bufferList[1].length );
-        return false;
-    }
-
-    // Check to see if the images are equivalent
-    diff = memcmp( state->bufferList[0].start ,
-                   state->bufferList[1].start,
-                   state->bufferList[0].length );
+    unsigned int difference;
+    unsigned int absCorrection;
+    unsigned int diffSum = 0;
+    unsigned int i;
+    unsigned int absDifference;
+    unsigned int filter;
     
-    if ( diff < 0 )
+
+    for( i = 0; i < msgLen; i++ )
     {
-        diff *= -1;
-    }
-    if ( diff > passLimit )
-    {
-        isPass = false;
+        // Get the difference between bytes of image data.
+        difference = (unsigned int)( bufNewer[i] - bufOlder[i] );
+        // The correction is used to get the absolute value. It is zero
+        // if difference is positive ( since the sign bit is zero ).
+        // If the difference is negative, it evaluates to 2X the number (but
+        // positive)
+        absCorrection = ( difference >> ( sizeof(difference) * 8 - 1 ) ) *
+                        ( 2 * ( ~difference + 1 ) );
+        absDifference = difference + absCorrection;
+        // The filter is used to exclude noise seen as small variations in
+        // difference per byte. It will evaluate to 1 if the high
+        // nibble is > 0. This was obtained through experimentation.
+        filter = ( absDifference >> 7 ) |
+                 ( absDifference >> 6 ) |
+                 ( absDifference >> 5 ) |
+                 ( absDifference >> 4 );
+        diffSum += absDifference * filter;
     }
 
-    return isPass;
+    // 256 = number of bits in each byte of image data.
+    // 100 to make a percentage.
+    // We return a calculated % difference.
+    return  ( ( (double)diffSum * 100.0 ) /
+              ( (double)msgLen * 256.0 ) );
+    
 }
+
 
 
 /******************************************************************************
@@ -973,91 +1287,66 @@ static bool selectImage( struct v4l2_state *state )
  * processImage
  *
  *
- * Description: Extracts the YUYV image out of the camera's memory mapped area
- *              and saves it in application space as an RGB ppm formatted image.
+ * Description: Carries out image processing on the input frame. The type of
+ *              processing depends on the compilation flags enabled.
  *
- * Arguments:   state (IN/OUT): v4l2 state with the information of an open
- *              video device.
+ *              - USE_COOL_BORDER: If enabled, adds a cool blue border to the
+ *                                 image. If disabled, the image will not have
+ *                                 this border.
+ *
+ *              - OUTPUT_YUYV_PPM: If enabled, the image will remain in YUYV
+ *                                 format when saved as .ppm file. The image
+ *                                 will look distorted in a weirdly asthetic
+ *                                 way. If disabled, a normal RGB image will
+ *                                 be saved and look normal under an image
+ *                                 viewer.
+ *
+ * Arguments:   frameData (IN/OUT): Buffer containing the frame to process.
+ *
+ *              frameLen (IN): Length, in bytes, of the frame to process.
+ *
+ *              frameWidth (IN): The number of pixels of the incoming frame's
+ *                               width. E.g. the 640 in 640x480.
+ *
+ *              outBuffer(OUT): Buffer to hold the processed frame.
+ *
+ *              outFrameSize(OUT): Size, in bytes, of the processed fame.
  *
  * Return:      true if successful, false otherwise.
  *
+ * Remarks:     If USE_COOL_BORDER is enabled, the input frame is modified.
+ *
  *****************************************************************************/
-static bool processImage( struct v4l2_state *state )
+static bool processImage( char *frameData,
+                          unsigned int frameLen,
+                          unsigned int frameWidth,
+                          char *outBuffer,
+                          unsigned int *outFrameSize )
 {
+#if USE_COOL_BORDER
+    addCoolBorder( frameData,
+                   frameLen,
+                   frameWidth );
+#endif // #if USE_COOL_BORDER
 
-    struct timespec curTime;
-    unsigned int stampLen;
-    // latest image always stored on the buffer that isn't the current one
-    // to load an image to.
-    int latestImageIndex = ( state->curBufIndex + 1 ) & 0x1;
-    bool isPass = false;
-    int outFrameSize;
-
-    // Add the timestamp to the image
-    clock_gettime( CLOCK_MONOTONIC_RAW, &curTime );
-    isPass = add_ppm_header( state->outBuffer,
-                             state->outBufferSize,
-                             (unsigned int)curTime.tv_sec,
-                             (unsigned int)curTime.tv_nsec / 1000,
-                             (unsigned int)state->formatData.fmt.pix.width,
-                             (unsigned int)state->formatData.fmt.pix.height,
-                             &stampLen );
-    if ( isPass == false )
-    {
-        goto END;
-    }
-
-    addCoolBorder( state->bufferList[latestImageIndex].start,
-                   state->bufferList[latestImageIndex].length,
-                   state->formatData.fmt.pix.width );
-
+#if !OUTPUT_YUYV_PPM
     // Transfer the image out of kernel space in RGB format
-    outFrameSize = convert_yuyv_image_to_rgb( state->bufferList[latestImageIndex].start,
-                                              state->bufferList[latestImageIndex].length,
-                                              state->outBuffer + stampLen );
+    *outFrameSize = convert_yuyv_image_to_rgb( frameData,
+                                               frameLen,
+                                               outBuffer );
+#else
+    memcpy( outBuffer, frameData, frameLen );
+    *outFrameSize = frameLen;
+#endif // #if !OUTPUT_YUYV_PPM #else
 
-    state->outDataSize = stampLen + outFrameSize;
-    memcpy( &(state->outDataTimeStamp),
-            &curTime,
-            sizeof(state->outDataTimeStamp) );
-    isPass = true;
-
-    //printf( "out sizes: header %u, frame %lu, total %u\n",
-    //        stampLen,
-    //        state->bufferList[latestImageIndex].length,
-    //        state->outDataSize );
-
-
-END:
-    return true;
-}
-
-/******************************************************************************
- *
- * writeImage
- *
- *
- * Description: Saves the ppm file to disk.
- *
- * Arguments:   state (IN/OUT): v4l2 state with the information of an open
- *              video device.
- *
- *              tag (IN): An number to attach to the written file's name.
- *
- * Return:      true if successful, false otherwise.
- *
- *****************************************************************************/
-static bool writeImage ( struct v4l2_state *state, unsigned int tag )
-{
-
-    dump_ppm( state->outBuffer, state->outDataSize, tag );
     return true;
 }
 
 
+
 /******************************************************************************
  *
- * add_ppm_header
+ * make_ppm_header
  *
  *
  * Description: Inserts a custom ppm header (stamp) into a buffer.
@@ -1093,6 +1382,8 @@ static bool add_ppm_header( char *buf,
     unsigned int resolutionStrLen = 0;
     unsigned int quotient;
 
+    // Get the number of bytes of a string that displays the horizontal and
+    // vertical resolution.
     for( i = 0; i < sizeof(resArr)/sizeof(resArr[0]); i++ )
     {
         quotient = resArr[i];
@@ -1132,7 +1423,7 @@ static bool add_ppm_header( char *buf,
 }
 
 
-
+#if !OUTPUT_YUYV_PPM
 /******************************************************************************
  *
  * convert_yuyv_image_to_rgb
@@ -1184,117 +1475,6 @@ static int convert_yuyv_image_to_rgb( char *yuyvBufIn,
     return newi;
 }
 
-/******************************************************************************
- *
- * addCoolBorder
- *
- *
- * Description: Adds a border to the frame that is very blue.
- *
- * Arguments:   yuyvBufIn (IN): buffer holding an image in YUYV format.
- *
- *              yuyvBufLen (IN): Size, in bytes, of the YUYV image.
- *
- *              pixelsPerLine (IN):  How many pixels are in each line of the
- *                                   image.
- *
- * Return:      N/A
- *
- *****************************************************************************/
-static void addCoolBorder( char *yuyvBufIn, int yuyvBufLen, int pixelsPerLine )
-{
-    int i;
-    int j;
-    int yuyvBytesPerLine = 2 * pixelsPerLine;
-    unsigned char *pptr = (unsigned char *)yuyvBufIn;
-
-    // top border
-    for ( i = 0; i < yuyvBufLen / 16; i += 4 )
-    {
-        pptr[i + 1] |= 0xff; // Max out U (Cb)
-    }
-
-    for ( i = yuyvBufLen / 16;
-          i < yuyvBufLen - yuyvBufLen / 16;
-          i += yuyvBytesPerLine )
-    {
-        // left border
-        //for( j = 0; j < yuyvBytesPerLine / 16; j += 4 )
-        //{
-        //    pptr[i + j + 1] |= 0xff; // Max out U (Cb)
-        //}
-
-        // Left and right borders
-        // not sure why the leftmost and rightmost border starts are bounded as
-        // follows
-        // leftmost: from ( yuyvBytesPerLine / 16 ) * 4
-        //           to ( yuyvBytesPerLine / 16 ) * 5
-        // rightmost: from ( yuyvBytesPerLine / 16 ) * 3
-        //            to ( yuyvBytesPerLine / 16 ) * 4
-        for( j = ( yuyvBytesPerLine / 16 ) * 3;
-             j < ( yuyvBytesPerLine / 16 ) * 5;
-             j += 4 )
-        {
-            pptr[i + j + 1] |= 0xff; // Max out U (Cb)
-        }
-
-        // right border
-        //for( j = yuyvBytesPerLine - yuyvBytesPerLine / 16;
-        //     j < yuyvBytesPerLine;
-        //     j += 4 )
-        //{
-        //    pptr[i + j + 1] |= 0xff; // Max out U (Cb)
-        //}
-    }
-
-    // bottom border
-    for ( i = yuyvBufLen - yuyvBufLen / 16; i < yuyvBufLen; i += 4 )
-    {
-        pptr[i + 1] |= 0xff; // Max out U (Cb)
-    }
-    
-}
-    
-
-/******************************************************************************
- *
- * dump_ppm
- *
- *
- * Description: Output image (frame) data as a colour ppm file.
- *
- * Arguments:   p (IN):    Pointer to image data.
- *
- *              size (IN): Size of image data in bytes.
- *
- *              tag (IN):  A number which will go into the filename of the
- *                         created file.
- *
- * Return:      N/A
- *
- *****************************************************************************/
-static void dump_ppm(const void *p, int size, unsigned int tag )
-{
-    int written, total, dumpfd;
-    char ppm_dumpname[]="test00000000.ppm";
-   
-    snprintf(&ppm_dumpname[4], 9, "%08d", tag);
-    //strncat(&ppm_dumpname[12], ".ppm", 4);
-    memcpy( &ppm_dumpname[12], ".ppm", 4 );
-    dumpfd = open(ppm_dumpname, O_WRONLY | O_NONBLOCK | O_CREAT, 00666);
-
-    total = 0;
-    do
-    {
-        written=write(dumpfd, p, size);
-        total+=written;
-    } while(total < size);
-
-    //printf("wrote %d bytes\n", total);
-
-    close(dumpfd);
-    
-}
 
 // This is probably the most acceptable conversion from camera YUYV to RGB
 //
@@ -1341,6 +1521,123 @@ static void yuv2rgb(int y,
    *g = g1 ;
    *b = b1 ;
 }
+#endif // #if !OUTPUT_YUYV_PPM
+
+#if USE_COOL_BORDER
+/******************************************************************************
+ *
+ * addCoolBorder
+ *
+ *
+ * Description: Adds a border to the frame that is very blue.
+ *
+ * Arguments:   yuyvBufIn (IN): buffer holding an image in YUYV format.
+ *
+ *              yuyvBufLen (IN): Size, in bytes, of the YUYV image.
+ *
+ *              pixelsPerLine (IN):  How many pixels are in each line of the
+ *                                   image.
+ *
+ * Return:      N/A
+ *
+ *****************************************************************************/
+static void addCoolBorder( char *yuyvBufIn, int yuyvBufLen, int pixelsPerLine )
+{
+    int i;
+    int j;
+    int yuyvBytesPerLine = 2 * pixelsPerLine;
+    unsigned char *pptr = (unsigned char *)yuyvBufIn;
+
+    // top border
+    for ( i = 0; i < yuyvBufLen / 16; i += 4 )
+    {
+        pptr[i + 1] |= 0xff; // Max out U (Cb)
+    }
+
+    for ( i = yuyvBufLen / 16;
+          i < yuyvBufLen - yuyvBufLen / 16;
+          i += yuyvBytesPerLine )
+    {
+        // Left and right borders
+        // not sure why the leftmost and rightmost border starts are bounded as
+        // follows in a YUYV image
+        // leftmost: from byte ( yuyvBytesPerLine / 16 ) * 4
+        //           to byte ( yuyvBytesPerLine / 16 ) * 5
+        // rightmost: from byte ( yuyvBytesPerLine / 16 ) * 3
+        //            to byte ( yuyvBytesPerLine / 16 ) * 4
+        for( j = ( yuyvBytesPerLine / 16 ) * 3;
+             j < ( yuyvBytesPerLine / 16 ) * 5;
+             j += 4 )
+        {
+            pptr[i + j + 1] |= 0xff; // Max out U (Cb)
+        }
+    }
+
+    // bottom border
+    for ( i = yuyvBufLen - yuyvBufLen / 16; i < yuyvBufLen; i += 4 )
+    {
+        pptr[i + 1] |= 0xff; // Max out U (Cb)
+    }
+    
+}
+#endif // #if USE_COOL_BORDER
+
+/******************************************************************************
+ *
+ * dump_ppm
+ *
+ *
+ * Description: Output image (frame) data as a colour ppm file.
+ *
+ * Arguments:   p (IN):    Pointer to image data.
+ *
+ *              size (IN): Size of image data in bytes.
+ *
+ *              header (IN): Pointer to ppm header
+ *
+ *              headerSize (In): length of ppm header in bytes.
+ *
+ *              tag (IN):  A number which will go into the filename of the
+ *                         created file.
+ *
+ * Return:      N/A
+ *
+ *****************************************************************************/
+static void dump_ppm( const void *p,
+                      int size,
+                      char *header,
+                      int headerSize,
+                      unsigned int tag )
+{
+    int written, total, dumpfd;
+    char ppm_dumpname[]="test00000000.ppm";
+   
+    snprintf(&ppm_dumpname[4], 9, "%08d", tag);
+    //strncat(&ppm_dumpname[12], ".ppm", 4);
+    memcpy( &ppm_dumpname[12], ".ppm", 4 );
+    dumpfd = open(ppm_dumpname, O_WRONLY | O_NONBLOCK | O_CREAT, 00666);
+
+    total = 0;
+    do
+    {
+        written=write(dumpfd, header, headerSize);
+        total+=written;
+    } while(total < headerSize);
+
+    total = 0;
+    do
+    {
+        written=write(dumpfd, p, size);
+        total+=written;
+    } while(total < size);
+
+    //printf("wrote %d bytes\n", total);
+
+    close(dumpfd);
+    
+}
+
+
 
 
 /******************************************************************************
@@ -1362,13 +1659,12 @@ static bool init_message_queue( mqd_t *mqDescriptor, char *mqName )
 {
     bool isPass = true;
     bool isMqCreated = false;
-    int is_init_failure = 0;
     struct mq_attr mqAttributes;
 
     
     /* setup common message q attributes */
-    mqAttributes.mq_maxmsg = NUM_BUFFERS;
-    mqAttributes.mq_msgsize = sizeof( struct load_to_select_msg );
+    mqAttributes.mq_maxmsg = NUM_MSG_QUEUE_BUFS;
+    mqAttributes.mq_msgsize = sizeof(union general_msg);
     mqAttributes.mq_flags = O_NONBLOCK;
     mqAttributes.mq_curmsgs = 0;
     
@@ -1381,7 +1677,7 @@ static bool init_message_queue( mqd_t *mqDescriptor, char *mqName )
                              &mqAttributes );
     if ( *mqDescriptor == (mqd_t)(-1) )
     {
-        errno_print( "init_message_queue\n" );
+        errno_print( "ERROR: init_message_queue\n" );
         isPass = false;
         goto END;
     }
@@ -1393,7 +1689,7 @@ static bool init_message_queue( mqd_t *mqDescriptor, char *mqName )
                      &mqAttributes,
                      NULL ) == -1 )
     {
-        errno_print( "init_message_queue\n" );
+        errno_print( "ERROR: init_message_queue\n" );
         isPass = false;
     }
 

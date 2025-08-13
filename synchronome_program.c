@@ -6,9 +6,6 @@
 #include "Services/synchronome_services.h"
 
 
-#define HRES 960
-#define VRES 540
-
 struct v4l2_state cameraState;
 
 int main( int argc, char *argv[] )
@@ -23,7 +20,7 @@ int main( int argc, char *argv[] )
 
 
     init_v4l2_state( &cameraState );
-
+    
     isPass = open_device( deviceName, &cameraState );
     if ( isPass == false )
     {
@@ -37,14 +34,14 @@ int main( int argc, char *argv[] )
         printf("init_device return: %i\n", isPass );
         return EXIT_FAILURE;
     }
-
+    
     isPass = start_capturing( &cameraState );
     if ( isPass == false )
     {
         printf("start_captureing return: %i\n", isPass );
     }
 
-    //printf ("state address 1 %p\n", &cameraState );
+    printf ("state address 1 %p\n", &cameraState );
     isPass = run_synchronome( &cameraState );
     if ( isPass == false )
     {

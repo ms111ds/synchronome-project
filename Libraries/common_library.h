@@ -14,5 +14,9 @@
 
 #endif // #ifndef _COMMON_LIB_H
 
+#define HRES 960
+#define VRES 540
+
 void errno_print(const char *s);
 double timespec_to_double_us( struct timespec *ts );
+double timespec_to_double_sec( struct timespec *ts );
