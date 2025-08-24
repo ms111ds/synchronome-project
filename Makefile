@@ -4,6 +4,7 @@ CC=gcc
 
 CDEFS=
 CFLAGS= -Wall -O0 -g $(addprefix -iquote ,$(INCLUDE_DIRS)) $(CDEFS)
+#CFLAGS= -Wall -O0 -pg $(addprefix -iquote ,$(INCLUDE_DIRS)) $(CDEFS)
 LIBS= -lrt
 
 HFILES= 
@@ -24,6 +25,7 @@ clean:
 	                   -name "*.d" -o \
 	                   -name "*.ppm" -o \
 	                   -name "*.pgm" -o \
+	                   -name "*.out" -o \
 	                   -name "*~" \) -delete
 	-rm -f synchronome_tests synchronome_program
 

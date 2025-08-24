@@ -17,29 +17,31 @@
 #ifndef _SYNCHRONOME_SRV_H
 #define _SYNCHRONOME_SRV_H
 
-#define MY_SCHED_POLICY SCHED_FIFO
-#define NUM_MSG_QUEUE_BUFS 5
 
+/*******************************************************************************
+ * LOGGING
+ ******************************************************************************/
 #define RECORD_SERVICES_LOG 0
-#define RECORD_IMG_CAPTURE_LOG 1
+#define RECORD_IMG_CAPTURE_LOG 0
+#define DUMP_DIFFS 0
+#define RECORD_QUEUE_SIZE 0
 
-#define USE_COOL_BORDER 0
-#define OUTPUT_YUYV_PPM 0
 
-#if RECORD_SERVICES_LOG
-#define SERVICE_LOG(str, arg1, arg2, arg3) \
-    syslog( LOG_CRIT, (str), (arg1), (arg2), (arg3) )
-#else // #if RECORD_SERVICES_LOG
-// to remove "set but not used" warning for arg3
-#define SERVICE_LOG(str, arg1, arg2, arg3) if(arg3 > 0.0){ }
-#endif // #if RECORD_SERVICES_LOG #else
+/*******************************************************************************
+ * FEATURES
+ ******************************************************************************/
+#define OPERATE_AT_10HZ 0  // Default: Synchronizes to clock running at 1Hz.
+#define USE_COOL_BORDER 1  // Default: No cool border applied to saved images.
+#define OUTPUT_YUYV_PPM 0  // Default: Images saved are formatted as RGB.
 
-#if RECORD_IMG_CAPTURE_LOG
-#define IMG_CAPTURE_LOG(str, arg1, arg2) syslog( LOG_CRIT, (str), (arg1), (arg2) )
-#else // #if RECORD_IMG_CAPTURE_LOG
-// to remove "set but not used" warning for arg2
-#define IMG_CAPTURE_LOG(str, arg1, arg2) if(arg2 > 0.0){ }
-#endif // #if RECORD_IMG_CAPTURE_LOG #else
+/*******************************************************************************
+ * FUNCTIONAL
+ ******************************************************************************/
+#define NUM_PICS 181
+#define MY_SCHED_POLICY SCHED_FIFO
+#define NUM_MSG_QUEUE_BUFS 32 // Must be this large as sometimes writing to
+                              // flash stalls. This causes the queue to get
+                              // filled up quite a bit.
 
 #endif // #ifndef _SYNCHRONOME_SRV_H
 

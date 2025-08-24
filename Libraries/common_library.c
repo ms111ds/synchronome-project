@@ -7,6 +7,30 @@
 void errno_print(const char *s)
 {
         fprintf(stderr, "%s error %d, %s\n", s, errno, strerror(errno));
+        switch( errno )
+        {
+            case EAGAIN:
+                fprintf( stderr, "%s\n", "EAGAIN" );
+                break;
+            case EBADF:
+                fprintf( stderr, "%s\n", "EBADF" );
+                break;
+            case EINTR:
+                fprintf( stderr, "%s\n", "EINTR" );
+                break;
+            case EINVAL:
+                fprintf( stderr, "%s\n", "EINVAL" );
+                break;
+            case EMSGSIZE:
+                fprintf( stderr, "%s\n", "EMSGSIZE" );
+                break;
+            case ETIMEDOUT:
+                fprintf( stderr, "%s\n", "ETIMEDOUT" );
+                break;
+            default:
+                break;
+        }
+            
 }
 
 /******************************************************************************

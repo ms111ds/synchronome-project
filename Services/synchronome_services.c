@@ -15,12 +15,54 @@
 #define MILLI_TO_NANO 1000000
 #define MICRO_TO_NANO 1000
 
+
+#if OPERATE_AT_10HZ
+
+#define UNIT_TIME_MS  33        // period (millisecs) for the sequencer to run
+#define T_LOAD_SELECT 1         // # of sequencer periods for load and select services
+#define DIFF_THRESHOLD 0.15     // Threshold for the select service to distinguish unique frames
+#define STABLE_FRAMES_THRESHOLD 1 // # of stable frames required for a new image to be selected
+
+#else // #if OPERATE_AT_10HZ
+
 #define UNIT_TIME_MS 33
 #define T_LOAD_SELECT 4
-//#define NUM_PERIODS 100
-#define NUM_PICS 1801
 #define DIFF_THRESHOLD 0.005
-#define STABLE_FRAMES_THRESHOLD 4
+#define STABLE_FRAMES_THRESHOLD 3
+
+#endif // #if OPERATE_AT_10HZ
+
+
+#if RECORD_SERVICES_LOG
+#define SERVICE_LOG(str, arg1, arg2, arg3) \
+    syslog( LOG_CRIT, (str), (arg1), (arg2), (arg3) )
+#else // #if RECORD_SERVICES_LOG
+// to remove "set but not used" warning for arg3
+#define SERVICE_LOG(str, arg1, arg2, arg3) if(arg3 > 0.0){ }
+#endif // #if RECORD_SERVICES_LOG #else
+
+#if RECORD_IMG_CAPTURE_LOG
+#define IMG_CAPTURE_LOG(str, arg1, arg2) syslog( LOG_CRIT, (str), (arg1), (arg2) )
+#else // #if RECORD_IMG_CAPTURE_LOG
+// to remove "set but not used" warning for arg2
+#define IMG_CAPTURE_LOG(str, arg1, arg2) if(arg2 > 0.0){ }
+#endif // #if RECORD_IMG_CAPTURE_LOG #else
+
+#if DUMP_DIFFS
+#define DIFF_LOG(str, arg1, arg2, arg3) \
+    syslog( LOG_CRIT, (str), (arg1), (arg2), (arg3) )
+#else // #if DUMP_DIFFS
+// to remove "set but not used" warning for arg2
+#define DIFF_LOG(str, arg1, arg2, arg3)
+#endif // #if DUMP_DIFFS #else
+
+#if RECORD_QUEUE_SIZE
+#define QUEUE_LOG(str, arg1, arg2, arg3) \
+    syslog( LOG_CRIT, (str), (arg1), (arg2), (arg3) )
+#else // #if RECORD_QUEUE_SIZE
+// to remove "set but not used" warning for arg2
+#define QUEUE_LOG(str, arg1, arg2, arg3)
+#endif // #if RECORD_QUEUE_SIZE #else
 
 struct thread_args
 {
@@ -44,6 +86,7 @@ struct select_to_process_msg
     unsigned int heightInPixels;
     unsigned int widthInPixels;
     struct timespec imageCaptureTime;
+    unsigned int imageCount;
 };
 
 union general_msg
@@ -63,6 +106,7 @@ struct sched_param paramsSelect;
 pthread_attr_t     attrProcessWrite;
 pthread_t          threadProcessWrite;
 struct sched_param paramsProcessWrite;
+
 
 pthread_attr_t     attrStarter;
 pthread_t          threadStarter;
@@ -95,14 +139,17 @@ double imageWriterMinTime;
 char unameBuf[256];
 unsigned int unameBufLen;
 char *selectOutBuf = NULL;
-char *processBuf = NULL;
+//char *processBuf = NULL;
+unsigned int frameBufLen;
 //char **frameArray = NULL;
 //char frameArray2[3][HRES * VRES * 3]
+unsigned int programEnding = 0;
 
 char *servicesLogString = "[Course #:4] [Final Project] [Run Count: %u] "
                           "[%s Elapsed Time: %lf us]";
 char *recordImageLogString = "[Course #:4] [Final Project] [Frame Count: %u] "
                              "[Image Capture Start Time: %lf seconds]";
+char *queueLogString = "[Final Project] %s mqsize (%u): %ld";
 
 
 static bool set_thread_attributes( pthread_attr_t *attr,
@@ -153,7 +200,7 @@ static void yuv2rgb(int y,
 #if USE_COOL_BORDER
 static void addCoolBorder( char *yuyvBufIn, int yuyvBufLen, int pixelsPerLine );
 #endif // #if USE_COOL_BORDER
-static bool init_message_queue( mqd_t *mqDescriptor, char *mqName );
+static bool init_message_queue( mqd_t *mqDescriptor, char *mqName, bool isBlocking );
 static void print_scheduler(void);
 
 /******************************************************************************
@@ -199,16 +246,21 @@ bool run_synchronome( struct v4l2_state *state )
         errno_print( "ERROR: TO_PROCESSING_MQ unlink 1" );
     }
 
-    // Dynamically allocate memory to create working buffers for frame
+    // Dynamically allocate memory to create working buffers for
     // frame processing.
-    processBuf = selectOutBuf = malloc( state->outBufferSize );
-    if ( processBuf == NULL )
-    {
-        errno_print( "ERROR: run_synchronome malloc" );
-        goto END;
-    }
 
-    selectOutBuf = malloc( state->outBufferSize );
+    //processBuf = malloc( frameBufLen );
+    //if ( processBuf == NULL )
+    //{
+    //    errno_print( "ERROR: run_synchronome malloc" );
+    //    goto END;
+    //}
+
+    // Dynamically allocate memory to create working buffers for frame
+    // processing. It is tied to the message queue size so that we can fill
+    // up the message queue and have to overwrite any data.
+    frameBufLen = state->outBufferSize;
+    selectOutBuf = malloc( frameBufLen * NUM_MSG_QUEUE_BUFS );
     if ( selectOutBuf == NULL )
     {
         errno_print( "ERROR: run_synchronome malloc" );
@@ -226,7 +278,7 @@ bool run_synchronome( struct v4l2_state *state )
         goto END;
     }
 
-    // set "test" service thread attributes
+    // set starter service thread attributes
     isPass = set_thread_attributes( &attrStarter,
                                     &paramsStarter,
                                     MY_SCHED_POLICY,
@@ -270,12 +322,11 @@ END:
         selectOutBuf = NULL;
     }
     
-    if ( processBuf != NULL )
-    {
-        free( processBuf );
-        processBuf = NULL;
-    }
-    processBuf = NULL;
+    //if ( processBuf != NULL )
+    //{
+    //    free( processBuf );
+    //    processBuf = NULL;
+    //}
     
     // clean up message queue when finished
     if ( mq_unlink( TO_SELECTION_MQ ) != 0 )
@@ -402,6 +453,9 @@ static void *starter( void *threadp )
     bool isStartedLoadService = false;
     bool isStartedSelectService = false;
     bool isStartedProcessWriteService = false;
+#if OPERATE_AT_10HZ
+    //bool isStartedProcessWriteService2 = false;
+#endif // #if OPERATE_AT_10HZ
     bool isTimerCreated = false;
     bool isMutAttrCreated = false;
     bool isMutCreated = false;
@@ -498,7 +552,7 @@ static void *starter( void *threadp )
     isPass = set_thread_attributes( &attrProcessWrite,
                                     &paramsProcessWrite,
                                     MY_SCHED_POLICY,
-                                    threadMinPriority, //threadMaxPriority - 3,
+                                    threadMinPriority,
                                     CORE_2 );
     if ( isPass != true )
     {
@@ -543,6 +597,7 @@ static void *starter( void *threadp )
         goto END;
     }
     isStartedProcessWriteService = true;
+
 
     printf( "All service threads created\n" );
 
@@ -604,6 +659,7 @@ END:
     	}
     }
 
+
     if ( isTimerCreated == true )
     {
         // Disable the timer
@@ -652,7 +708,7 @@ void sequencer(int id)
     pthread_mutex_unlock( &mutexSynchronome );
     
     
-    if ( rp > 0 )
+    if ( ( rp > 0 ) && ( programEnding == 0 ) )
     {
         curPeriod++;
         //printf( "curPeriod: %u, mod %u\n", curPeriod,  curPeriod % T_LOAD_SELECT );
@@ -705,11 +761,12 @@ static void *service_load( void *threadp )
     int mmapIdx1;
     int mmapIdx2;
     struct timespec startCaptureTimes[NUM_CAMERA_BUFFERS];
+    struct mq_attr mqAttr;
     
     clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
     count++;
 
-    rv = init_message_queue( &mq_to_selection, TO_SELECTION_MQ );
+    rv = init_message_queue( &mq_to_selection, TO_SELECTION_MQ, false );
     if ( rv == false )
     {
         goto END;
@@ -722,7 +779,7 @@ static void *service_load( void *threadp )
     curBuf = 0;
     if ( queue_stream_bufs( curBuf, state ) == false )
     {
-       goto END;
+        goto END;
     }
     clock_gettime( CLOCK_MONOTONIC_RAW, &(startCaptureTimes[curBuf]) );
     clock_gettime( CLOCK_MONOTONIC_RAW, &endTime );
@@ -754,7 +811,7 @@ static void *service_load( void *threadp )
     // frames to start looking for stable images.
     if ( queue_stream_bufs( 1, state ) == false )
     {
-       goto END;
+        goto END;
     }
 
     // the three indicies below will help us keep track of image buffers
@@ -841,6 +898,9 @@ static void *service_load( void *threadp )
             (unsigned int)state->formatData.fmt.pix.width;
 
         msgOut.loadToSelectMsg.imageCaptureTime = startCaptureTimes[prevBuf];
+
+        mq_getattr( mq_to_selection, &mqAttr );
+        QUEUE_LOG(queueLogString, "LOAD", count, mqAttr.mq_curmsgs );
         
         if ( mq_send( mq_to_selection,
                       (char *)&msgOut,
@@ -858,6 +918,8 @@ END:
     {
         mq_close( mq_to_selection );
     }
+
+    programEnding++;
 
     printf( "end load service\n" );
 
@@ -892,14 +954,15 @@ static void *service_select( void *threadp )
     char *bufOlder;
     unsigned int msgLen;
     int count = 0;
-    //struct mq_attr mqAttr;
+    struct mq_attr mqAttr;
     double percentDiff;
-    bool isStable = false;
     unsigned int numStableFrames = 0;
     struct timespec startTime;
     struct timespec endTime;
     double deltaTimeUs;
-    //unsigned int outCount = 0;
+    unsigned int outCount = 0;
+    char *bufferToProcessing;
+
 
     clock_gettime( CLOCK_MONOTONIC_RAW, &startTime );
     count++;
@@ -907,14 +970,14 @@ static void *service_select( void *threadp )
     // initialize two message queues. One to recieve images to compare from the
     // image loading service, the other to send new stable images to the
     // process + write service.
-    rv = init_message_queue( &mq_from_load, TO_SELECTION_MQ );
+    rv = init_message_queue( &mq_from_load, TO_SELECTION_MQ, false );
     if ( rv == false )
     {
         goto END;
     }
     isMqFromLoadCreated = true;
 
-    rv = init_message_queue( &mq_to_processing, TO_PROCESSING_MQ );
+    rv = init_message_queue( &mq_to_processing, TO_PROCESSING_MQ, false );
     if ( rv == false )
     {
         goto END;
@@ -969,45 +1032,62 @@ static void *service_select( void *threadp )
         bufOlder = msgIn.loadToSelectMsg.buf2;
         msgLen   = msgIn.loadToSelectMsg.msgLen;
 
+
         // Compare the two images.
         percentDiff = calc_array_diff_8bit( bufNewer, bufOlder, msgLen );
         //printf( "percentDiff(%u): %lf\n", count, percentDiff );
 
+        DIFF_LOG( "[Final Project] %% diff @t=%.1lfms (count %u): %lf",
+                  timespec_to_double_us( &startTime ) / 1000.0,
+                  count,
+                  percentDiff );
+        
+        
         if ( percentDiff > DIFF_THRESHOLD )
         {
             // case where a large difference in frames is encountered.
-            // Note the instability by setting isStable and numStableFrames.
-            isStable = false;
-            numStableFrames = 1;
-            continue;
+            // Note the instability by setting isStable to false.
+            numStableFrames = 0;
+            continue;         
         }
 
         numStableFrames++;
+        
 
-        if ( isStable == true )
+        if ( numStableFrames < STABLE_FRAMES_THRESHOLD )
+        {
+            // case where we have recently encountered a large difference
+            // in frames (unstable) and we are trying to see if the frames
+            // have settled to a new stable one.
+            continue;
+        }
+        else if ( numStableFrames > STABLE_FRAMES_THRESHOLD )
         {
             // case where have seen a sequence of virtually unchanging fames...
             // Do nothing with them.
             continue;
         }
 
-        // case where we have recently encountered a large difference
-        // in frames (unstable) and we are trying to see if the frames
-        // have settled to a new stable one.
-        if ( numStableFrames < STABLE_FRAMES_THRESHOLD )
-        {
-            continue;
-        }
-
-        //outCount++;
-        //printf( "####(%u count) %%diff %lf\n", outCount,percentDiff );
         
+        // Only go here when numStableFrames == STABLE_FRAMES_THRESHOLD
+
         // Here the frames have settled to a new one. We can remove the
         // instability flag and send the frame for processing.
-        isStable = true;
+        outCount++;
+
+        //DIFF_LOG( "[Final Project] %% diff @t=%.1lfms (count %u): %lf",
+        //          timespec_to_double_us( &startTime ) / 1000.0,
+        //          outCount,
+        //          percentDiff );
+
+        // select the buffer to send for processing. slectOutBuf is tied to the
+        // message queue max size. This way the entire message queue can be filled
+        // with unique frame data (without overwritting anything).
+        bufferToProcessing =
+            &selectOutBuf[(outCount % NUM_MSG_QUEUE_BUFS) * frameBufLen];
         
-        memcpy( selectOutBuf, bufNewer, msgLen );
-        msgOut.selectToProcessMsg.buf = selectOutBuf;
+        memcpy( bufferToProcessing, bufNewer, msgLen );
+        msgOut.selectToProcessMsg.buf = bufferToProcessing;
         msgOut.selectToProcessMsg.msgLen = msgLen;
         
         msgOut.selectToProcessMsg.heightInPixels =
@@ -1018,7 +1098,13 @@ static void *service_select( void *threadp )
 
         msgOut.selectToProcessMsg.imageCaptureTime =
             msgIn.loadToSelectMsg.imageCaptureTime;
-        
+
+        msgOut.selectToProcessMsg.imageCount = outCount;
+
+        mq_getattr( mq_to_processing, &mqAttr );
+        QUEUE_LOG(queueLogString, "SELECT", outCount, mqAttr.mq_curmsgs );
+        //syslog( LOG_CRIT, "SELECT mqmessages: %ld", mqAttr.mq_curmsgs );
+
         if ( mq_send( mq_to_processing,
                       (char *)&msgOut,
                       sizeof(msgOut),
@@ -1043,6 +1129,8 @@ END:
     {
         mq_close( mq_to_processing );
     }
+
+    programEnding++;
 
     printf( "end select service\n" );
 
@@ -1086,10 +1174,13 @@ static void *service_process_and_write( void *threadp )
     double deltaTimeUs;
     double imageCaptureTimeSec;
     unsigned int count = 0;
+    unsigned int outCount;
+    char *processBuf;
+    //struct mq_attr mqAttr;
 
     //printf( "START PROCESS + WRITE\n" );
 
-    rv = init_message_queue( &mq_from_selection, TO_PROCESSING_MQ );
+    rv = init_message_queue( &mq_from_selection, TO_PROCESSING_MQ, false );
     if ( rv == false )
     {
         goto END;
@@ -1098,6 +1189,13 @@ static void *service_process_and_write( void *threadp )
 
     //mq_getattr( mq_from_selection, &mqAttr );
     //printf( "in process+write. MQ cur msgs = %li\n", mqAttr.mq_curmsgs );
+
+    processBuf = malloc( frameBufLen );
+    if ( processBuf == NULL )
+    {
+        errno_print( "ERROR: run_synchronome malloc" );
+        goto END;
+    }
 
 
 
@@ -1129,6 +1227,9 @@ static void *service_process_and_write( void *threadp )
             }
         }
 
+        //mq_getattr( mq_from_selection, &mqAttr );
+        //syslog( LOG_CRIT, "PROCESS: %ld", mqAttr.mq_curmsgs );
+
 
         count++;
 
@@ -1138,6 +1239,7 @@ static void *service_process_and_write( void *threadp )
         frameHeight = msgIn.selectToProcessMsg.heightInPixels;
         frameWidth = msgIn.selectToProcessMsg.widthInPixels;
         imageCaptureTime = msgIn.selectToProcessMsg.imageCaptureTime;
+        outCount = msgIn.selectToProcessMsg.imageCount;
 
 
         // process the frame
@@ -1187,7 +1289,7 @@ static void *service_process_and_write( void *threadp )
                   processedFrameLen,
                   headerBuf,
                   stampLen,
-                  count );
+                  outCount );
 
 
         pthread_mutex_lock( &mutexSynchronome );
@@ -1198,7 +1300,7 @@ static void *service_process_and_write( void *threadp )
         deltaTimeUs = timespec_to_double_us( &endTime ) -
                       timespec_to_double_us( &startTime );
 
-        SERVICE_LOG( servicesLogString, count, "PROCESS", deltaTimeUs );
+        SERVICE_LOG( servicesLogString, outCount, "PROCESS", deltaTimeUs );
 
         imageCaptureTimeSec = timespec_to_double_sec( &imageCaptureTime );
         IMG_CAPTURE_LOG( recordImageLogString, count, imageCaptureTimeSec );
@@ -1210,6 +1312,14 @@ END:
     {
         mq_close( mq_from_selection );
     }
+
+    if ( processBuf != NULL )
+    {
+        free( processBuf );
+        processBuf = NULL;
+    }
+
+    programEnding++;
 
     printf( "end process + write service\n" );
 
@@ -1651,11 +1761,14 @@ static void dump_ppm( const void *p,
  *
  *              mqName (OUT): name of the new message queue.
  *
+ *              isBlocking (IN): specify if the queue should block if full
+ *                               (mq_send) or empty (mq_recieve)
+ *
  * Return:      true if the message queue was created successfully. Otherwise
  *              returns false.
  *
  *****************************************************************************/
-static bool init_message_queue( mqd_t *mqDescriptor, char *mqName )
+static bool init_message_queue( mqd_t *mqDescriptor, char *mqName, bool isBlocking )
 {
     bool isPass = true;
     bool isMqCreated = false;
@@ -1665,8 +1778,16 @@ static bool init_message_queue( mqd_t *mqDescriptor, char *mqName )
     /* setup common message q attributes */
     mqAttributes.mq_maxmsg = NUM_MSG_QUEUE_BUFS;
     mqAttributes.mq_msgsize = sizeof(union general_msg);
-    mqAttributes.mq_flags = O_NONBLOCK;
     mqAttributes.mq_curmsgs = 0;
+
+    if ( isBlocking == true )
+    {
+        mqAttributes.mq_flags = 0;
+    }
+    else
+    {
+        mqAttributes.mq_flags = O_NONBLOCK;
+    }
     
 
     // create message queue for loading service to message image processing
