@@ -54,10 +54,7 @@ struct v4l2_state {
     struct v4l2_format formatData;
     unsigned int numBuffers;
     struct buffer *bufferList;
-    int curBufIndex;
-    char *outBuffer;
-    unsigned int outBufferSize;
-    unsigned int outDataSize;
+    unsigned int processedImageSize;
     struct timespec outDataTimeStamp;
 };
 

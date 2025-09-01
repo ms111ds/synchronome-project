@@ -23,7 +23,7 @@
  ******************************************************************************/
 #define RECORD_SERVICES_LOG 0
 #define RECORD_IMG_CAPTURE_LOG 0
-#define DUMP_DIFFS 0
+#define DUMP_DIFFS 1
 #define RECORD_QUEUE_SIZE 0
 
 

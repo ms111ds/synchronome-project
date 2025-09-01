@@ -4,16 +4,6 @@
 #define _V4L2_LIBRARY_C
 
 
-
-
-
-//static void errno_exit(const char *s)
-//{
-//        fprintf(stderr, "%s error %d, %s\n", s, errno, strerror(errno));
-//        exit(EXIT_FAILURE);
-//}
-
-
 static int xioctl(int fh, int request, void *arg)
 {
         int r;
@@ -87,7 +77,6 @@ static bool init_mmap( struct v4l2_state *state )
         goto END;
     }
 
-    //buffers = calloc(req.count, sizeof(*buffers));
     buffers = calloc( req.count, sizeof(struct buffer) );
 
     if ( buffers == NULL ) 
@@ -466,22 +455,15 @@ bool init_device( enum io_method ioMethod,
         formatData.fmt.pix.sizeimage = min;
     }
 
-    // create buffer to hold RGB frame for processing
-    state->outBufferSize = MAX_HEADER_SIZE +
-                           ( numHorizontalPixels * numVerticalPixels ) * 3;
-    state->outBuffer = (char *)malloc( state->outBufferSize );
-    if ( state->outBuffer == NULL )
-    {
-        errno_print( "malloc frame" );
-        goto END;
-    }
-    
+    // Save the size of a buffer needed to store a ppm image holding RGB data.
+    state->processedImageSize = MAX_HEADER_SIZE +
+                                ( numHorizontalPixels * numVerticalPixels ) * 3;
+
 
     // Initialize selected I/O method
     switch ( ioMethod )
     {
         case IO_METHOD_READ:
-            //init_read(fmt.fmt.pix.sizeimage);
             isSuccess = false;
             printf( "read()/write() I/O currently not supported\n" );
             goto END;
@@ -492,7 +474,6 @@ bool init_device( enum io_method ioMethod,
             break;
 
         case IO_METHOD_USERPTR:
-            //init_userp(fmt.fmt.pix.sizeimage);
             isSuccess = false;
             printf( "user pointer I/O currently not supported\n" );
             goto END;
@@ -561,7 +542,6 @@ bool uninit_device( struct v4l2_state *state )
             break;
     }
 
-    free ( state->outBuffer );
     free( state->bufferList );
     memset( state, '\0', sizeof(*state) );
 
@@ -736,9 +716,7 @@ bool queue_stream_bufs( int buf_index, struct v4l2_state *state )
         default:
             break;
     }
-    //syslog( LOG_INFO,"%s LOAD SRV enqueued... buf %i\n", p_assignment_str, buf_index );
 
-    //printf("R");
     return isPass;
 }
 
@@ -762,9 +740,7 @@ bool queue_stream_bufs( int buf_index, struct v4l2_state *state )
 bool read_frame_stream( int *bufIndex, struct v4l2_state *state )
 {
     struct v4l2_buffer buf;
-    //unsigned int i;
     bool isPass = false;
-    //int rv = -1;
 
     
     switch ( state->ioMethod )
@@ -797,9 +773,7 @@ bool read_frame_stream( int *bufIndex, struct v4l2_state *state )
                 // and return buffer info
                 state->bufferList[buf.index].length = buf.bytesused;
                 *bufIndex = buf.index;
-                state->curBufIndex = buf.index;
                 isPass = true;
-                //printf( "buf length = %i\n", buf.bytesused );
             }
 
     	    break;
@@ -812,7 +786,6 @@ bool read_frame_stream( int *bufIndex, struct v4l2_state *state )
             errno_print("read_frame_stream(): unknown i/o");
     }
 
-    //printf("R");
     return isPass;
 }
 
